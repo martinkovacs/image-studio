@@ -82,24 +82,35 @@ export function Section({
   title,
   children,
   defaultOpen = true,
+  open,
+  onToggle,
   aside
 }: {
   title: string
   children: ReactNode
   defaultOpen?: boolean
+  /** Controlled open state; omitted keeps the default uncontrolled behaviour. */
+  open?: boolean
+  /** Notified on every toggle; usable in both controlled and uncontrolled modes. */
+  onToggle?: (open: boolean) => void
   aside?: ReactNode
 }) {
-  const [open, setOpen] = useState(defaultOpen)
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen)
+  const isOpen = open ?? uncontrolledOpen
+  const toggle = () => {
+    setUncontrolledOpen(!isOpen)
+    onToggle?.(!isOpen)
+  }
   return (
     <section className="border-b border-ink-800">
       <div className="flex items-center gap-2 px-4 py-2.5">
-        <button onClick={() => setOpen(!open)} className="flex flex-1 items-center gap-2 text-left">
-          <ChevronDown size={13} className={cx('text-ink-400 transition-transform', !open && '-rotate-90')} />
+        <button onClick={toggle} className="flex flex-1 items-center gap-2 text-left">
+          <ChevronDown size={13} className={cx('text-ink-400 transition-transform', !isOpen && '-rotate-90')} />
           <span className="font-display text-[13px] font-semibold tracking-tight text-ink-200">{title}</span>
         </button>
         {aside}
       </div>
-      {open && <div className="flex flex-col gap-4 px-4 pb-4">{children}</div>}
+      {isOpen && <div className="flex flex-col gap-4 px-4 pb-4">{children}</div>}
     </section>
   )
 }

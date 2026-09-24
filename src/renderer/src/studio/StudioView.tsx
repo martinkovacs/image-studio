@@ -71,11 +71,26 @@ export function StudioView() {
   const addRefImages = useStore((s) => s.addRefImages)
   const setView = useStore((s) => s.setView)
   const [showNeg, setShowNeg] = useState(negativePrompt.length > 0)
+  const [imagesOpen, setImagesOpen] = useState(true)
 
   const advanced = settings.studioDetail === 'advanced'
   const model = orModels.find((m) => m.id === orModel)
   const local = provider === 'local'
   const needsKey = provider === 'openrouter' && !settings.openrouter.hasApiKey
+  const capsStem = useStore((s) => s.caps?.model.stem)
+
+  // The Images section follows what the selected model can accept: OpenRouter
+  // models only when they take input images, local always (ref/init images).
+  // It re-syncs on model/provider changes only — in between the user toggles
+  // it manually, so attaching images must not re-open it here.
+  useEffect(() => {
+    const s = useStore.getState()
+    const m = s.orModels.find((x) => x.id === s.orModel)
+    const spec = m?.supported_parameters.input_references
+    const maxRefs = spec?.type === 'range' ? spec.max : 0
+    const supported = s.provider === 'local' || maxRefs > 0
+    setImagesOpen(supported || s.inputs.refImages.length > 0 || !!s.inputs.initImage)
+  }, [provider, orModel, orModels, capsStem])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -151,7 +166,7 @@ export function StudioView() {
               ))}
           </Section>
 
-          <Section title="Images" defaultOpen={refCount > 0 || hasInit}>
+          <Section title="Images" open={imagesOpen} onToggle={setImagesOpen}>
             <RefImages orModel={model} />
             {local && advanced && (
               <div className="flex flex-col gap-3 border-t border-ink-800 pt-3">
