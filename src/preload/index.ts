@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { StudioApi } from '@shared/types'
+import { IS_SLIM } from '@shared/edition'
 
 const invoke = (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args)
 
@@ -10,6 +11,7 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
 }
 
 const api: StudioApi = {
+  edition: IS_SLIM ? 'slim' : 'full',
   settings: {
     get: () => invoke('settings:get'),
     update: (patch) => invoke('settings:update', patch),

@@ -284,6 +284,8 @@ export interface ChatThread {
 // Preload API exposed as window.api
 
 export interface StudioApi {
+  /** Build-time edition: 'slim' has no local sd.cpp engine, 'full' has both providers. */
+  readonly edition: 'full' | 'slim'
   settings: {
     get(): Promise<AppSettings>
     update(patch: DeepPartial<AppSettings>): Promise<AppSettings>
