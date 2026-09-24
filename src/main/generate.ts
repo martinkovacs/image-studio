@@ -25,18 +25,30 @@ export const localDisabled = (): Error => new Error(LOCAL_DISABLED_MSG)
 
 export interface SdServerLike {
   status(): ServerStatus
-  start(profile: LocalModelProfile, serverPath: string, port: number): Promise<ServerStatus>
+  start(
+    profile: LocalModelProfile,
+    serverPath: string,
+    port: number,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ServerStatus>
   imgGen(
     body: SdImgGenBody,
-    opts: { signal?: AbortSignal; onQueued?: (pos: number) => void },
+    opts: {
+      signal?: AbortSignal
+      onQueued?: (pos: number) => void
+      onState?: (state: 'queued' | 'generating') => void
+    },
   ): Promise<{ format: string; images: Buffer[] }>
-  upscale(body: {
-    image: string
-    upscaler?: string
-    repeats?: number
-    tile_size?: number
-    output_format?: string
-  }): Promise<{ image: Buffer; format: string; width: number; height: number; upscaler: string }>
+  upscale(
+    body: {
+      image: string
+      upscaler?: string
+      repeats?: number
+      tile_size?: number
+      output_format?: string
+    },
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ image: Buffer; format: string; width: number; height: number; upscaler: string }>
   on(event: 'progress', cb: (p: { step: number; total: number; speed?: string }) => void): void
   on(event: 'stage', cb: (stage: 'decoding' | 'hires' | 'sampling') => void): void
   off(event: 'progress', cb: (p: { step: number; total: number; speed?: string }) => void): void
@@ -59,6 +71,16 @@ export interface Generator {
 }
 
 const NO_KEY_MSG = 'OpenRouter API key not set — add it in Settings'
+
+/** Error carrying the flag set by sd-server when it could not interrupt an already-running job. */
+export const NON_INTERRUPTIBLE_CANCELLED_MSG =
+  'Cancelled — sd-server cannot interrupt a running generation, so it finishes in the background and the result is discarded.'
+
+/**
+ * The id of the job sd-server is currently generating. 'progress'/'stage' events
+ * are process-wide (not per job), so listeners use this to attribute them.
+ */
+let generatingJobId: string | null = null
 const NO_ENGINE_MSG =
   'No stable-diffusion.cpp engine installed — install one in Settings → Local engine'
 const NO_PROFILE_MSG = 'No active local model profile selected — pick one in Settings'
@@ -73,6 +95,7 @@ export function createGenerator(deps: GeneratorDeps): Generator {
   /** Resolves the active profile and ensures the server is ready with it loaded. */
   async function ensureServerRunning(
     jobId: string,
+    signal?: AbortSignal,
   ): Promise<{ profile: LocalModelProfile }> {
     const settings = deps.getSettings()
     const profile = settings.local.profiles.find((p) => p.id === settings.local.activeProfileId)
@@ -82,7 +105,7 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     const status = deps.server.status()
     if (status.state !== 'ready' || status.profileId !== profile.id) {
       emit(jobId, { stage: 'loading', message: `Starting ${profile.name}` })
-      const started = await deps.server.start(profile, serverPath, settings.local.listenPort)
+      const started = await deps.server.start(profile, serverPath, settings.local.listenPort, { signal })
       if (started.state !== 'ready') {
         throw new Error(started.error ?? 'Local engine failed to start')
       }
@@ -95,26 +118,42 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     jobId: string,
     op: (ac: AbortController) => Promise<GenerationResult>,
   ): Promise<GenerationResult> {
+    if (activeJobs.has(jobId)) {
+      // Do not touch the running job; report the collision to the new caller only.
+      return { ok: false, jobId, error: 'Duplicate job id' }
+    }
     const ac = new AbortController()
     activeJobs.set(jobId, ac)
     try {
       return await op(ac)
     } catch (e) {
-      if (ac.signal.aborted || e instanceof CancelledError || (e as { name?: string })?.name === 'AbortError') {
+      const err = e as { name?: string; message?: string; interrupted?: boolean }
+      if (ac.signal.aborted || e instanceof CancelledError || err?.name === 'AbortError') {
+        // sd-server sets interrupted:false when a job that was already generating
+        // could not be interrupted; it keeps running and the result is discarded.
+        if (err?.name === 'AbortError' && err.interrupted === false) {
+          return { ok: false, jobId, cancelled: true, error: NON_INTERRUPTIBLE_CANCELLED_MSG }
+        }
         return { ok: false, jobId, cancelled: true, error: 'Cancelled' }
       }
       return { ok: false, jobId, error: e instanceof Error ? e.message : String(e) }
     } finally {
-      activeJobs.delete(jobId)
+      // Only remove our own entry; a newer controller may have replaced it.
+      if (activeJobs.get(jobId) === ac) activeJobs.delete(jobId)
     }
   }
 
   /** Shared tail: save outputs + inputs, build the HistoryItem, record + emit done. */
   async function finalize(jobId: string, args: FinalizeArgs): Promise<GenerationResult> {
     const files = await saveOutputs(args.settings.outputDir, args.outputs)
-    const inputFiles = await saveInputs(args.settings.outputDir, args.dataUrls)
+    // Aligned 1:1 with dataUrls; null entries failed to parse and are skipped.
+    const savedInputs = await saveInputs(args.settings.outputDir, args.dataUrls)
+    const inputFiles = savedInputs.filter((p): p is string => p !== null)
     const urlMap = new Map<string, string>()
-    for (let i = 0; i < args.dataUrls.length; i++) urlMap.set(args.dataUrls[i], inputFiles[i])
+    for (let i = 0; i < args.dataUrls.length; i++) {
+      const saved = savedInputs[i]
+      if (saved) urlMap.set(args.dataUrls[i], saved)
+    }
     const dims = args.outputs[0] ? readImageDimensions(args.outputs[0].data) : null
 
     const item: HistoryItem = {
@@ -205,7 +244,7 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     // instead of touching the (absent) server.
     if (IS_SLIM) return { ok: false, jobId, error: LOCAL_DISABLED_MSG }
     emit(jobId, { stage: 'loading', message: 'Ensuring local engine is ready' })
-    const { profile } = await ensureServerRunning(jobId)
+    const { profile } = await ensureServerRunning(jobId, ac.signal)
 
     const local = req.local ?? {}
     // Pick our own seed for -1/undefined so the exact value can be recorded.
@@ -228,11 +267,15 @@ export function createGenerator(deps: GeneratorDeps): Generator {
       ...(req.inputs.maskImage ? [req.inputs.maskImage] : []),
     ]
     let phase: string | undefined
+    // 'progress'/'stage' are process-wide events: ignore them unless this job is
+    // the one sd-server is currently generating.
     const onProgress = (p: { step: number; total: number; speed?: string }): void => {
+      if (generatingJobId !== jobId) return
       // A restarting step count (e.g. hires second pass) is fine; phase labels it.
       emit(jobId, { stage: 'sampling', step: p.step, totalSteps: p.total, speed: p.speed, message: phase })
     }
     const onStage = (stage: 'decoding' | 'hires' | 'sampling'): void => {
+      if (generatingJobId !== jobId) return
       if (stage === 'hires') phase = 'hires pass'
       emit(jobId, stage === 'decoding' ? { stage: 'decoding' } : { stage: 'sampling', message: phase })
     }
@@ -241,10 +284,19 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     let result: { format: string; images: Buffer[] }
     try {
       emit(jobId, { stage: 'waiting' })
-      result = await deps.server.imgGen(body, { signal: ac.signal })
+      result = await deps.server.imgGen(body, {
+        signal: ac.signal,
+        onQueued: (pos) => {
+          emit(jobId, { stage: 'queued', message: `Waiting in sd-server queue (position ${pos})` })
+        },
+        onState: (state) => {
+          if (state === 'generating') generatingJobId = jobId
+        },
+      })
     } finally {
       deps.server.off('progress', onProgress)
       deps.server.off('stage', onStage)
+      if (generatingJobId === jobId) generatingJobId = null
     }
 
     const mediaType = mimeFromFormat(result.format)
@@ -279,22 +331,25 @@ export function createGenerator(deps: GeneratorDeps): Generator {
 
     async upscale(jobId, req): Promise<GenerationResult> {
       const startedAt = Date.now()
-      return withJob(jobId, async () => {
+      return withJob(jobId, async (ac) => {
         if (IS_SLIM) return { ok: false, jobId, error: LOCAL_DISABLED_MSG }
         const item = await deps.history.get(req.historyId)
         if (!item) throw new Error(`History item not found: ${req.historyId}`)
         const file = item.files[req.fileIndex]
         if (!file) throw new Error(`History item has no file at index ${req.fileIndex}`)
         emit(jobId, { stage: 'loading' })
-        await ensureServerRunning(jobId)
+        await ensureServerRunning(jobId, ac.signal)
         const bytes = await readFile(file)
         emit(jobId, { stage: 'uploading' })
-        const result = await deps.server.upscale({
-          image: toDataUrl(bytes, file),
-          upscaler: req.upscaler,
-          repeats: req.repeats,
-          tile_size: req.tileSize,
-        })
+        const result = await deps.server.upscale(
+          {
+            image: toDataUrl(bytes, file),
+            upscaler: req.upscaler,
+            repeats: req.repeats,
+            tile_size: req.tileSize,
+          },
+          { signal: ac.signal },
+        )
         const filesOut = await saveOutputs(deps.getSettings().outputDir, [
           { data: result.image, mediaType: mimeFromFormat(result.format) },
         ])
@@ -337,24 +392,36 @@ async function saveOutputs(
   const files: string[] = []
   for (let i = 0; i < outputs.length; i++) {
     const base = `${Date.now()}-${randomBytes(3).toString('hex')}-${i}`
-    const file = join(dir, `${base}.${extFromMediaType(outputs[i].mediaType)}`)
+    const file = join(dir, `${base}.${extFromMediaType(outputs[i].mediaType, outputs[i].data)}`)
     await writeFile(file, outputs[i].data)
     files.push(file)
   }
   return files
 }
 
-/** Saves data-URL inputs deduplicated by content sha1, into `<date>/inputs/`. */
-async function saveInputs(outputDir: string, dataUrls: string[]): Promise<string[]> {
-  const out: string[] = []
+/**
+ * Saves data-URL inputs deduplicated by content sha1, into `<date>/inputs/`.
+ * Returns one entry per input, aligned 1:1 with `dataUrls` — null when the
+ * data URL could not be parsed.
+ */
+async function saveInputs(
+  outputDir: string,
+  dataUrls: string[],
+): Promise<(string | null)[]> {
+  const out: (string | null)[] = []
   if (dataUrls.length === 0) return out
   const dir = join(outputDir, new Date().toISOString().slice(0, 10), 'inputs')
   for (const dataUrl of dataUrls) {
-    const m = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl)
-    if (!m) continue
-    const bytes = Buffer.from(m[2], 'base64')
+    // Mime type, optional extra parameters (e.g. ;charset=utf-8) and the
+    // base64 payload (standard or base64url alphabet).
+    const m = /^data:([^;,]+);(?:[^;,]+;)*base64,([A-Za-z0-9+/=_-]+)$/.exec(dataUrl)
+    if (!m) {
+      out.push(null)
+      continue
+    }
+    const bytes = Buffer.from(m[2].replace(/-/g, '+').replace(/_/g, '/'), 'base64')
     const hash = createHash('sha1').update(bytes).digest('hex')
-    const file = join(dir, `${hash}.${extFromMediaType(m[1])}`)
+    const file = join(dir, `${hash}.${extFromMediaType(m[1], bytes)}`)
     const exists = await stat(file).then(
       () => true,
       () => false,
@@ -456,15 +523,40 @@ function readWebpDimensions(buf: Buffer): ImageDimensions | null {
 // ---------------------------------------------------------------------------
 // Misc
 
-function extFromMediaType(mediaType: string): string {
-  switch (mediaType) {
+export function extFromMediaType(mediaType: string, data?: Buffer): string {
+  switch (mediaType.toLowerCase()) {
+    case 'image/png':
+      return 'png'
     case 'image/jpeg':
       return 'jpg'
     case 'image/webp':
       return 'webp'
+    case 'image/gif':
+      return 'gif'
+    case 'image/svg+xml':
+      return 'svg'
     default:
-      return 'png'
+      // Unknown media type: fall back to sniffing the magic bytes.
+      return data ? sniffImageFormat(data) : 'bin'
   }
+}
+
+/** Guesses the image format from magic bytes; 'bin' when nothing matches. */
+export function sniffImageFormat(buf: Buffer): string {
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(PNG_SIGNATURE)) return 'png'
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xd8) return 'jpg'
+  if (
+    buf.length >= 12 &&
+    buf.subarray(0, 4).toString('latin1') === 'RIFF' &&
+    buf.subarray(8, 12).toString('latin1') === 'WEBP'
+  ) {
+    return 'webp'
+  }
+  if (buf.length >= 4 && buf.subarray(0, 4).toString('latin1').startsWith('GIF')) return 'gif'
+  // SVG: optional BOM/whitespace, then an XML declaration or the <svg> root.
+  const head = buf.subarray(0, 256).toString('utf8').replace(/^\uFEFF?\s+/, '')
+  if (head.startsWith('<?xml') || head.startsWith('<svg')) return 'svg'
+  return 'bin'
 }
 
 function mimeFromFormat(format: string): string {
@@ -474,6 +566,10 @@ function mimeFromFormat(format: string): string {
       return 'image/jpeg'
     case 'webp':
       return 'image/webp'
+    case 'gif':
+      return 'image/gif'
+    case 'svg':
+      return 'image/svg+xml'
     default:
       return 'image/png'
   }

@@ -46,8 +46,11 @@ export class HistoryStore {
       let text = ''
       try {
         text = await readFile(this.file, 'utf8')
-      } catch {
-        return // no history yet
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') return // no history yet
+        // Don't cache the failure: reset so a later call retries the read.
+        this.loaded = null
+        throw e
       }
       for (const line of text.split('\n')) {
         if (!line.trim()) continue
@@ -108,7 +111,6 @@ export class HistoryStore {
   private async append(rec: LogRecord): Promise<void> {
     await this.load()
     await this.serialize(async () => {
-      this.apply(rec)
       const line = `${JSON.stringify(rec)}\n`
       try {
         await appendFile(this.file, line)
@@ -120,6 +122,9 @@ export class HistoryStore {
           throw e
         }
       }
+      // Only after the write succeeded may the record reach the in-memory state,
+      // so a failed write leaves memory untouched (it is retried on the next call).
+      this.apply(rec)
       if (this.tombstones > COMPACT_AFTER_TOMBSTONES) await this.compact()
     })
   }
@@ -175,9 +180,15 @@ export class HistoryStore {
     await this.load()
     const item = this.items.get(id)
     if (opts.deleteFiles && item) {
-      await Promise.all(
-        [...item.files, ...item.inputFiles].map((p) => rm(p, { force: true })),
-      )
+      // Input files are content-deduplicated and may be shared with other items:
+      // only delete the ones no remaining item references. Outputs are unique.
+      const sharedInputs = new Set<string>()
+      for (const other of this.items.values()) {
+        if (other.id === id) continue
+        for (const p of other.inputFiles) sharedInputs.add(p)
+      }
+      const orphans = item.inputFiles.filter((p) => !sharedInputs.has(p))
+      await Promise.all([...item.files, ...orphans].map((p) => rm(p, { force: true })))
     }
     await this.append({ t: 'item-del', id })
   }
@@ -195,11 +206,13 @@ export class HistoryStore {
   }
 
   async renameThread(id: string, title: string): Promise<void> {
+    await this.load()
     if (!this.threadById.get(id)) throw new Error(`Unknown thread: ${id}`)
     await this.append({ t: 'thread-rename', id, title })
   }
 
   async touchThread(id: string): Promise<void> {
+    await this.load()
     if (!this.threadById.get(id)) throw new Error(`Unknown thread: ${id}`)
     await this.append({ t: 'thread-touch', id, at: Date.now() })
   }

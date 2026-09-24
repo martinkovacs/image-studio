@@ -1,9 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HistoryStore } from './history'
 import type { HistoryItem } from '../shared/types'
+
+// Wrap appendFile so individual tests can simulate write failures.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return { ...actual, appendFile: vi.fn(actual.appendFile) }
+})
 
 let dir: string
 
@@ -136,5 +142,62 @@ describe('HistoryStore', () => {
     await store.add(item('n'))
     await expect(readFile(join(nested, 'history.jsonl'))).resolves.toBeTruthy()
     void mkdir
+  })
+
+  it('renameThread and touchThread work before anything else has loaded the log', async () => {
+    await tick()
+    const store = new HistoryStore(dir)
+    const thread = await store.createThread('t')
+    // Fresh instance: nothing has been loaded yet.
+    const reopened = new HistoryStore(dir)
+    await reopened.renameThread(thread.id, 'renamed')
+    await reopened.touchThread(thread.id)
+    const threads = await reopened.threads()
+    expect(threads[0]!.title).toBe('renamed')
+    expect(threads[0]!.updatedAt).toBeGreaterThanOrEqual(threads[0]!.createdAt)
+  })
+
+  it('remove with deleteFiles keeps input files still referenced by other items', async () => {
+    await mkdir(join(dir, 'inputs'), { recursive: true })
+    const input = join(dir, 'inputs', 'shared.png')
+    await writeFile(input, 'img')
+    const store = new HistoryStore(dir)
+    await store.add(item('a', { files: [join(dir, 'a.png')], inputFiles: [input] }))
+    await store.add(item('b', { files: [join(dir, 'b.png')], inputFiles: [input] }))
+    await store.remove('a', { deleteFiles: true })
+    await expect(readFile(input)).resolves.toEqual(Buffer.from('img'))
+    expect(await store.get('a')).toBeNull()
+    expect(await store.get('b')).toBeTruthy()
+    // once the last referrer is gone the shared input goes with it
+    await store.remove('b', { deleteFiles: true })
+    await expect(readFile(input)).rejects.toThrow()
+  })
+
+  it('leaves in-memory state untouched when the append write fails', async () => {
+    const store = new HistoryStore(dir)
+    await store.add(item('w1'))
+    const { appendFile } = await import('node:fs/promises')
+    vi.mocked(appendFile).mockRejectedValueOnce(new Error('disk full'))
+    await expect(store.add(item('w2'))).rejects.toThrow('disk full')
+    expect(await store.get('w2')).toBeNull()
+    expect((await store.list()).map((i) => i.id)).toEqual(['w1'])
+    // next attempt succeeds and the record is applied
+    await store.add(item('w2'))
+    expect(await store.get('w2')).toBeTruthy()
+  })
+
+  it('load rejects non-ENOENT read errors and retries on a later call', async () => {
+    const root = join(dir, 'hist')
+    await mkdir(root)
+    await mkdir(join(root, 'history.jsonl')) // the log path is a directory → EISDIR, not ENOENT
+    const store = new HistoryStore(root)
+    await expect(store.list()).rejects.toThrow(/EISDIR/)
+    // A second call also fails (the failure was not cached as "empty history").
+    await expect(store.list()).rejects.toThrow(/EISDIR/)
+    // File becomes readable: the store must retry and succeed.
+    await rm(root, { recursive: true })
+    await mkdir(root)
+    await writeFile(join(root, 'history.jsonl'), JSON.stringify({ t: 'item', v: item('fx') }) + '\n')
+    await expect(store.list()).resolves.toEqual([expect.objectContaining({ id: 'fx' })])
   })
 })

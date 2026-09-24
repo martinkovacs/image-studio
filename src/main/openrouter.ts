@@ -145,7 +145,14 @@ export async function generateImages(
     throw new Error(await parseErrorMessage(res, `OpenRouter image generation failed (HTTP ${res.status})`))
   }
 
-  const json = (await res.json()) as OrImageResponse
+  const json = (await res.json()) as OrImageResponse & { message?: unknown; text?: unknown }
+  if (json.error) {
+    // Some providers report failures with an HTTP 200 and an in-body error object.
+    throw new Error(
+      json.error.message ??
+        `OpenRouter request failed${json.error.code !== undefined ? ` (code ${json.error.code})` : ''}`,
+    )
+  }
   const entries = json.data ?? []
   const images: GeneratedImage[] = []
   for (const entry of entries) {
@@ -157,6 +164,14 @@ export async function generateImages(
     } else if (entry.url) {
       images.push(await fetchImageFromUrl(entry.url, args.signal))
     }
+  }
+
+  if (images.length === 0) {
+    // An empty 200 body: surface any textual reason the response carried.
+    const reason = (<readonly unknown[]>[json.text, json.message]).find(
+      (v): v is string => typeof v === 'string' && v.trim() !== '',
+    )
+    throw new Error(`OpenRouter returned no images${reason ? `: ${reason}` : ''}`)
   }
 
   return { images, costUsd: json.usage?.cost, raw: json }
