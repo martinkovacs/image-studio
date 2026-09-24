@@ -101,8 +101,9 @@ export function buildServerArgs(profile: LocalModelProfile, port: number): strin
     if (value === undefined || value === '') continue
     args.push(`--${id}`, String(value))
   }
-  args.push('--listen-ip', '127.0.0.1', '--listen-port', String(port))
   if (profile.extraArgs?.trim()) args.push(...splitShellArgs(profile.extraArgs))
+  // Last so extra args can't move the server off the loopback port we poll.
+  args.push('--listen-ip', '127.0.0.1', '--listen-port', String(port))
   return args
 }
 
@@ -303,6 +304,39 @@ export interface SdServerOptions {
   portProbeImpl?: (port: number) => Promise<boolean>
 }
 
+/**
+ * Resolve/reject with `promise`, or reject with AbortError when `signal` aborts
+ * first (calling `onAbort`). The listener is removed once settled, so aborting
+ * the same signal later (e.g. to cancel a generation) has no effect here.
+ */
+function withCallerSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined, onAbort: () => void): Promise<T> {
+  if (!signal) return promise
+  return new Promise<T>((resolve, reject) => {
+    let done = false
+    const abort = (): void => {
+      if (done) return
+      done = true
+      onAbort()
+      reject(abortError('start was aborted'))
+    }
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(
+      (v) => {
+        if (done) return
+        done = true
+        signal.removeEventListener('abort', abort)
+        resolve(v)
+      },
+      (e) => {
+        if (done) return
+        done = true
+        signal.removeEventListener('abort', abort)
+        reject(e)
+      }
+    )
+  })
+}
+
 export class SdServer extends EventEmitter {
   private child: ChildProcess | null = null
   private statusValue: ServerStatus = { state: 'stopped', profileId: null, port: null }
@@ -364,6 +398,8 @@ export class SdServer extends EventEmitter {
   /** Bumps the epoch (invalidating any in-flight start) and queues the actual stop. */
   private requestStop(): Promise<ServerStatus> {
     this.epoch++
+    // A pending stop supersedes any in-flight start: later callers must not join it.
+    this.inflight = null
     return this.enqueue(() => this.doStop())
   }
 
@@ -423,27 +459,27 @@ export class SdServer extends EventEmitter {
     port: number,
     opts: { signal?: AbortSignal } = {}
   ): Promise<ServerStatus> {
-    if (this.statusValue.state === 'ready' && this.statusValue.profileId === profile.id) return this.status()
-    if (this.inflight?.profileId === profile.id) return this.inflight.promise
     if (opts.signal?.aborted) throw abortError('start was aborted')
-    this.epoch++
-    const promise = this.enqueue(() => this.doStart(profile, serverPath, port))
+    // "Already ready" only counts while no stop/start has been requested since
+    // that status was published (statusEpoch === epoch).
+    const settled = this.statusEpoch === this.epoch
+    if (settled && this.statusValue.state === 'ready' && this.statusValue.profileId === profile.id) return this.status()
+    if (this.inflight?.profileId === profile.id) {
+      // Joining someone else's load: our abort only detaches us, it must not stop theirs.
+      return withCallerSignal(this.inflight.promise, opts.signal, () => {})
+    }
+    // Capture the epoch now: if a stop/start supersedes this call while it is
+    // still queued, doStart sees the mismatch and never spawns.
+    const epoch = ++this.epoch
+    const promise = this.enqueue(() => this.doStart(profile, serverPath, port, epoch))
     this.inflight = { profileId: profile.id, promise }
     promise.catch(() => {}) // cleanup runs even when nobody listens
     void promise.finally(() => {
       if (this.inflight?.promise === promise) this.inflight = null
     })
-    if (!opts.signal) return promise
-    const signal = opts.signal
-    return new Promise<ServerStatus>((resolve, reject) => {
-      const onAbort = () => {
-        // Same as stop(): kill whatever this start spawned, land on 'stopped'.
-        void this.requestStop()
-        reject(abortError('start was aborted'))
-      }
-      if (signal.aborted) onAbort()
-      else signal.addEventListener('abort', onAbort, { once: true })
-      promise.then(resolve, reject)
+    // Owner abort behaves like stop() — but only while this start is still current.
+    return withCallerSignal(promise, opts.signal, () => {
+      if (this.epoch === epoch) void this.requestStop()
     })
   }
 
@@ -462,9 +498,10 @@ export class SdServer extends EventEmitter {
     return this.status()
   }
 
-  private async doStart(profile: LocalModelProfile, serverPath: string, port: number): Promise<ServerStatus> {
-    const epoch = this.epoch
+  private async doStart(profile: LocalModelProfile, serverPath: string, port: number, epoch: number): Promise<ServerStatus> {
     const aborted = (): boolean => this.epoch !== epoch
+    // Superseded while queued: the newer operation owns the process and status.
+    if (aborted()) return this.status()
 
     // Tear down whatever instance is running before touching anything else.
     const existing = this.child
@@ -519,7 +556,7 @@ export class SdServer extends EventEmitter {
       return this.setStatus('error', `failed to spawn sd-server: ${String(err)}`)
     }
     this.child = child
-    this.attachChildPipes(child)
+    this.attachChildPipes(child, epoch)
     this.attachExitHandlers(child, epoch)
 
     if (aborted()) {
@@ -537,12 +574,15 @@ export class SdServer extends EventEmitter {
   }
 
   /** Output handlers must only act while their child is still the live one. */
-  private attachChildPipes(child: ChildProcess): void {
+  private attachChildPipes(child: ChildProcess, epoch: number): void {
     const out = this.stdoutLines
     const err = this.stderrLines
-    child.stdout?.on('data', (b: Buffer) => this.handleOutput(out, b))
-    child.stderr?.on('data', (b: Buffer) => this.handleOutput(err, b))
+    // Output of a superseded instance must not leak into the next one's log.
+    const current = (): boolean => this.epoch === epoch
+    child.stdout?.on('data', (b: Buffer) => current() && this.handleOutput(out, b))
+    child.stderr?.on('data', (b: Buffer) => current() && this.handleOutput(err, b))
     child.once('close', () => {
+      if (!current()) return
       // Flush any trailing partial line the child left without a terminator.
       this.ingestLines(out.end())
       this.ingestLines(err.end())

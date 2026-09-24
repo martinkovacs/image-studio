@@ -102,14 +102,16 @@ describe('buildServerArgs', () => {
     expect(args).not.toContain('--not_a_flag')
   })
 
-  it('appends listen-ip and listen-port, then split extraArgs', () => {
+  it('appends split extraArgs, then the forced listen-ip and listen-port', () => {
     const args = buildServerArgs({ ...base, args: {}, extraArgs: '' }, 8000)
     expect(args).toEqual(['--listen-ip', '127.0.0.1', '--listen-port', '8000'])
     const withExtra = buildServerArgs({ ...base, args: {}, extraArgs: '--fa --rng cpu --tokenizer "a b"' }, 8000)
     expect(withExtra).toEqual([
-      '--listen-ip', '127.0.0.1', '--listen-port', '8000',
-      '--fa', '--rng', 'cpu', '--tokenizer', 'a b'
+      '--fa', '--rng', 'cpu', '--tokenizer', 'a b',
+      '--listen-ip', '127.0.0.1', '--listen-port', '8000'
     ])
+    const override = buildServerArgs({ ...base, args: {}, extraArgs: '--listen-port 9999' }, 8000)
+    expect(override.slice(-2)).toEqual(['--listen-port', '8000'])
   })
 
   it('omits flags whose value is false or empty string', () => {
@@ -375,6 +377,55 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
     await vi.waitFor(() => expect(server.status().state).toBe('stopped'))
     expect(isGone(spawned[0])).toBe(true)
   }, 15_000)
+
+  it('aborting the signal after start() resolved does not stop the loaded server', async () => {
+    const server = newServer({ readyTimeoutMs: 15_000 })
+    const controller = new AbortController()
+    const status = await server.start(profile('p1'), fakeScript, await freePort(), { signal: controller.signal })
+    expect(status.state).toBe('ready')
+    // generate.ts reuses the job's signal for imgGen; cancelling that job must not unload the model.
+    controller.abort()
+    await new Promise((r) => setTimeout(r, 200))
+    expect(server.status().state).toBe('ready')
+    expect(isGone(spawned[0])).toBe(false)
+  }, 10_000)
+
+  it('start immediately followed by stop never spawns (superseded while queued)', async () => {
+    saveEnv('FAKE_SD_READY_DELAY_MS', '15000')
+    const server = newServer({ readyTimeoutMs: 60_000 })
+    const startPromise = server.start(profile('p1'), fakeScript, await freePort())
+    const began = Date.now()
+    const stopStatus = await server.stop()
+    await startPromise
+    expect(stopStatus.state).toBe('stopped')
+    expect(Date.now() - began).toBeLessThan(3_000)
+    expect(spawned).toHaveLength(0)
+  }, 10_000)
+
+  it('a same-profile start after a pending stop restarts instead of reporting the dying instance', async () => {
+    const server = newServer({ readyTimeoutMs: 15_000 })
+    await server.start(profile('p1'), fakeScript, await freePort())
+    const stopping = server.stop()
+    const restarted = await server.start(profile('p1'), fakeScript, await freePort())
+    await stopping
+    expect(restarted.state).toBe('ready')
+    expect(server.status().state).toBe('ready')
+    expect(spawned).toHaveLength(2)
+    expect(isGone(spawned[0])).toBe(true)
+  }, 15_000)
+
+  it('a caller joining an in-flight start can abort without stopping the shared load', async () => {
+    saveEnv('FAKE_SD_READY_DELAY_MS', '400')
+    const server = newServer({ readyTimeoutMs: 15_000 })
+    const owner = server.start(profile('p1'), fakeScript, await freePort())
+    await onceState(server, 'starting')
+    const controller = new AbortController()
+    const joiner = server.start(profile('p1'), fakeScript, await freePort(), { signal: controller.signal })
+    controller.abort()
+    await expect(joiner).rejects.toMatchObject({ name: 'AbortError' })
+    expect((await owner).state).toBe('ready')
+    expect(spawned).toHaveLength(1)
+  }, 10_000)
 
   it('start() with an already-aborted signal rejects immediately without spawning', async () => {
     const controller = new AbortController()

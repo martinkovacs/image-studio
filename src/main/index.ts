@@ -236,10 +236,12 @@ app.whenReady().then(() => {
 
 let quitting = false
 app.on('before-quit', (e) => {
-  if (quitting || server.status().state === 'stopped') return
+  if (squirrelEvent || server.status().state === 'stopped') return
+  // Keep the app alive until sd-server has really exited, even on repeated quits.
   e.preventDefault()
+  if (quitting) return
   quitting = true
-  void server.stop().finally(() => app.quit())
+  void server.stop().finally(() => app.exit(0))
 })
 
 app.on('window-all-closed', () => {
