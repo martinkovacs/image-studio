@@ -4,8 +4,17 @@ productName: Image Studio
 directories:
   output: release
 
+# Consistent artifact names across editions: <productName>-<version>-<os>-<arch>.<ext>
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
 files:
   - out/**
+  - package.json
+  # The sd.cpp engine ships as extraResources only — never inside the asar.
+  - '!resources/sdcpp/**'
+
+# No native node dependencies to rebuild against Electron's ABI.
+npmRebuild: false
 
 # Pre-fetched engine(s): <resources>/sdcpp/<variantId>/ end up next to the app
 # under resources/sdcpp/. asarUnpack is not needed for resources.
@@ -16,14 +25,23 @@ extraResources:
       - '**/*'
 
 linux:
-  targets:
-    - AppImage
-    - tar.gz
+  target:
+    - zip
 
 win:
-  targets:
-    - nsis
+  target: squirrel
+
+# Squirrel.Windows options live at the root level (the squirrel target reads
+# config.squirrelWindows). Required by electron-builder when package.json has
+# no repository field that could infer it. Purely nuspec metadata (always-on
+# "Programs and Features" icon); it is not downloaded at build time.
+squirrelWindows:
+  # Squirrel package id / nupkg name / install dir (%LOCALAPPDATA%\ImageStudio).
+  # Distinct per edition so full and slim can live side by side and the
+  # release page never collides.
+  name: ImageStudio
+  iconUrl: https://raw.githubusercontent.com/electron/electron/main/shell/browser/resources/win/electron.ico
 
 mac:
-  targets:
+  target:
     - dmg
