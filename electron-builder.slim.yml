@@ -1,0 +1,44 @@
+# Slim edition (Image Studio Lite): OpenRouter-only, no bundled sd.cpp engine.
+# Duplicated from electron-builder.yml rather than extended from it: local
+# `extends` is supported by electron-builder 26, but deep-merging concatenates
+# array options, so the full edition's extraResources could not be unset.
+appId: com.imagestudio.lite
+productName: Image Studio Lite
+
+directories:
+  output: release
+
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+files:
+  - out/**
+  - package.json
+  # The sd.cpp engine ships as extraResources only — never inside the asar
+  # (the slim edition bundles none anyway, see "No extraResources" below).
+  - '!resources/sdcpp/**'
+
+# No native node dependencies to rebuild against Electron's ABI.
+npmRebuild: false
+
+# No extraResources: the slim edition ships no stable-diffusion.cpp engine.
+
+linux:
+  target:
+    - zip
+
+win:
+  target: squirrel
+
+# Squirrel.Windows options live at the root level (the squirrel target reads
+# config.squirrelWindows). Required when package.json has no repository field;
+# not downloaded at build time (nuspec metadata only).
+squirrelWindows:
+  # Squirrel package id / nupkg name / install dir (%LOCALAPPDATA%\ImageStudioLite).
+  # Distinct per edition so full and slim can live side by side and the
+  # release page never collides.
+  name: ImageStudioLite
+  iconUrl: https://raw.githubusercontent.com/electron/electron/main/shell/browser/resources/win/electron.ico
+
+mac:
+  target:
+    - dmg
