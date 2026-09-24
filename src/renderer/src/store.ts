@@ -83,12 +83,18 @@ export type Store = State & Actions
 
 const localKey = (stem: string) => `localParams:${stem}`
 
-function loadLocalOverrides(stem: string): SdImgGenBody {
+/** Parse a localStorage JSON object; a corrupted value must never white-screen the app. */
+function readJson<T extends object>(key: string): T {
   try {
-    return JSON.parse(localStorage.getItem(localKey(stem)) ?? '{}')
+    const v: unknown = JSON.parse(localStorage.getItem(key) ?? '{}')
+    return (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as T
   } catch {
-    return {}
+    return {} as T
   }
+}
+
+function loadLocalOverrides(stem: string): SdImgGenBody {
+  return readJson<SdImgGenBody>(localKey(stem))
 }
 
 /** Deep merge for the nested sd.cpp body objects. */
@@ -112,6 +118,7 @@ export function effectiveLocalParams(s: Pick<State, 'caps' | 'localParams'>): Sd
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined
+let initialized = false
 
 export const useStore = create<Store>((set, get) => ({
   settings: null,
@@ -122,7 +129,7 @@ export const useStore = create<Store>((set, get) => ({
   orModels: [],
   orModelsError: null,
   orModel: '',
-  orParams: JSON.parse(localStorage.getItem('orParams') ?? '{}'),
+  orParams: readJson<OrImageParams>('orParams'),
   serverStatus: { state: 'stopped', profileId: null, port: null },
   caps: null,
   localParams: {},
@@ -134,6 +141,9 @@ export const useStore = create<Store>((set, get) => ({
   toast: null,
 
   async init() {
+    // StrictMode mounts effects twice; IPC subscriptions must exist exactly once.
+    if (initialized) return
+    initialized = true
     const settings = await window.api.settings.get()
     set({ settings, orModel: localStorage.getItem('orModel') || settings.openrouter.defaultModel })
     window.api.gen.onProgress((p) => {
@@ -161,7 +171,10 @@ export const useStore = create<Store>((set, get) => ({
 
   setView: (view) => set({ view }),
   set: (key, value) => {
-    if (key === 'provider') localStorage.setItem('provider', value as string)
+    if (key === 'provider') {
+      localStorage.setItem('provider', value as string)
+      if (value !== 'local') set({ inpaintMode: false })
+    }
     set({ [key]: value } as Partial<State>)
   },
 
@@ -244,6 +257,17 @@ export const useStore = create<Store>((set, get) => ({
       if (!s.orModel) {
         s.showError('Pick an OpenRouter model')
         return null
+      }
+      const model = s.orModels.find((m) => m.id === s.orModel)
+      const refSpec = model?.supported_parameters.input_references
+      const maxRefs = refSpec?.type === 'range' ? refSpec.max : 0
+      if (model && req.inputs.refImages.length > maxRefs) {
+        if (maxRefs === 0 && !opts?.threadId) {
+          s.showError('This model does not accept input images — remove them or pick an edit-capable model')
+          return null
+        }
+        // Chat auto-attaches the previous result; silently trim to what the model accepts.
+        req.inputs.refImages = req.inputs.refImages.slice(0, maxRefs)
       }
       req.openrouter = { model: s.orModel, params: s.orParams }
     } else {

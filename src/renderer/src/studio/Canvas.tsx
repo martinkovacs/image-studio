@@ -288,6 +288,15 @@ export function Canvas() {
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null)
   const [upscaler, setUpscaler] = useState('')
   const box = useRef<HTMLDivElement>(null)
+  const [, setBoxSize] = useState(0)
+  useEffect(() => {
+    const el = box.current
+    if (!el) return
+    // "Fit" zoom is derived from the box size during render; re-render on resize.
+    const ro = new ResizeObserver(() => setBoxSize((n) => n + 1))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   const dragging = useRef<{ x: number; y: number; px: number; py: number } | null>(null)
 
   const item = history.find((h) => h.id === selected?.id) ?? history[0]

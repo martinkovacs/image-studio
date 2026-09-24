@@ -320,6 +320,7 @@ export function Chip({ active, children, onClick, title }: { active?: boolean; c
   return (
     <button
       title={title}
+      aria-pressed={!!active}
       onClick={onClick}
       className={cx(
         'h-7 rounded-md border px-2 font-mono text-[11px] transition-colors',
@@ -347,6 +348,7 @@ export function Combobox({
 }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
+  const [hi, setHi] = useState(0)
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!open) return
@@ -358,10 +360,28 @@ export function Combobox({
   }, [open])
   const current = items.find((i) => i.value === value)
   const filtered = items.filter((i) => (i.label + ' ' + i.value).toLowerCase().includes(q.toLowerCase()))
+  const pick = (v: string) => {
+    onChange(v)
+    setOpen(false)
+    setQ('')
+  }
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') setOpen(false)
+    else if (e.key === 'ArrowDown') setHi((h) => Math.min(filtered.length - 1, h + 1))
+    else if (e.key === 'ArrowUp') setHi((h) => Math.max(0, h - 1))
+    else if (e.key === 'Enter' && filtered[hi]) pick(filtered[hi].value)
+    else return
+    e.preventDefault()
+  }
   return (
     <div ref={ref} className="relative">
       <button
-        onClick={() => setOpen(!open)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => {
+          setHi(0)
+          setOpen(!open)
+        }}
         className={cx(inputBase, 'flex items-center justify-between text-left')}
       >
         <span className={cx('truncate', !current && 'text-ink-500')}>{current?.label ?? (value || placeholder)}</span>
@@ -372,22 +392,26 @@ export function Combobox({
           <input
             autoFocus
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setQ(e.target.value)
+              setHi(0)
+            }}
+            onKeyDown={onKey}
             placeholder="Search…"
             className="h-8 w-full border-b border-ink-700 bg-transparent px-2.5 text-[13px] outline-none"
           />
-          <div className="max-h-80 overflow-y-auto py-1">
-            {filtered.map((i) => (
+          <div role="listbox" className="max-h-80 overflow-y-auto py-1">
+            {filtered.map((i, idx) => (
               <button
                 key={i.value}
-                onClick={() => {
-                  onChange(i.value)
-                  setOpen(false)
-                  setQ('')
-                }}
+                role="option"
+                aria-selected={i.value === value}
+                ref={idx === hi ? (el) => el?.scrollIntoView({ block: 'nearest' }) : undefined}
+                onMouseEnter={() => setHi(idx)}
+                onClick={() => pick(i.value)}
                 className={cx(
                   'flex w-full items-start justify-between gap-2 px-2.5 py-1.5 text-left hover:bg-ink-800',
-                  i.value === value && 'bg-ink-800'
+                  (i.value === value || idx === hi) && 'bg-ink-800'
                 )}
               >
                 <span className="min-w-0">

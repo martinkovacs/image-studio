@@ -106,7 +106,10 @@ export function InitImage() {
   const inpaint = useStore((s) => s.inpaintMode)
   const set = useStore((s) => s.set)
   const caps = useStore((s) => s.caps)
-  const setInit = (url?: string) => set('inputs', { ...inputs, initImage: url, maskImage: undefined })
+  const setInit = (url?: string) => {
+    set('inputs', { ...inputs, initImage: url, maskImage: undefined })
+    if (!url) set('inpaintMode', false)
+  }
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-start gap-2">

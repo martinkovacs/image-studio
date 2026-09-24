@@ -247,9 +247,21 @@ export function ChatView() {
   const lastOutput = [...items].reverse().find((i) => i.files.length)?.files[0]
   const autoAttach = continueEditing && attachments.length === 0 && !!lastOutput
 
+  const sending = useRef(false)
+
   const send = async () => {
     const prompt = text.trim()
-    if (!prompt) return
+    // Guard the async prelude (thread creation, attachment read) against double submits.
+    if (!prompt || sending.current) return
+    sending.current = true
+    try {
+      await sendPrompt(prompt)
+    } finally {
+      sending.current = false
+    }
+  }
+
+  const sendPrompt = async (prompt: string) => {
     let refImages = attachments
     if (autoAttach && lastOutput) refImages = [await window.api.history.readAsDataUrl(lastOutput)]
     let threadId = active
@@ -262,12 +274,12 @@ export function ChatView() {
     setAttachments([])
     const useInit = provider === 'local' && asInit && refImages.length > 0
     const inputs = useInit ? { refImages: [], initImage: refImages[0] } : { refImages }
+    sending.current = false
     const res = await generate({ threadId, prompt, inputs })
-    if (res?.ok) {
-      if (useStore.getState().settings && threadId === localStorage.getItem(ACTIVE_KEY)) setItems((prev) => [...prev, res.item])
-    } else if (res && !res.cancelled) {
-      setErrors((e) => [...e, { prompt, error: res.error }])
-    }
+    // The user may have switched threads while this was generating.
+    const stillActive = threadId === localStorage.getItem(ACTIVE_KEY)
+    if (res?.ok && stillActive) setItems((prev) => [...prev, res.item])
+    else if (res && !res.ok && !res.cancelled && stillActive) setErrors((e) => [...e, { prompt, error: res.error }])
     void loadThreads()
   }
 
