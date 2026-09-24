@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron'
-import { join, resolve, sep } from 'node:path'
+import { spawn } from 'node:child_process'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { IMG_PROTOCOL } from '@shared/types'
 import type { EngineInstallProgress, GenerationProgress, GenerationRequest, UpscaleRequest } from '@shared/types'
@@ -10,6 +11,26 @@ import { HistoryStore } from './history'
 import { createGenerator, localDisabled, readFileAsDataUrl } from './generate'
 import { getEngineInfo, installEngine, resolveServerPath } from './sdcpp/engine'
 import { listDevices, SdServer } from './sdcpp/server'
+
+/**
+ * Squirrel.Windows runs the app with --squirrel-* flags during install/update/
+ * uninstall; create or remove shortcuts via Update.exe and exit immediately.
+ */
+function handleSquirrelEvent(): boolean {
+  if (process.platform !== 'win32') return false
+  const cmd = process.argv[1]
+  if (!cmd?.startsWith('--squirrel-')) return false
+  const updateExe = resolve(dirname(process.execPath), '..', 'Update.exe')
+  const exe = basename(process.execPath)
+  const runUpdate = (args: string[]): void => {
+    spawn(updateExe, args, { detached: true }).on('close', () => app.quit())
+  }
+  if (cmd === '--squirrel-install' || cmd === '--squirrel-updated') runUpdate(['--createShortcut', exe])
+  else if (cmd === '--squirrel-uninstall') runUpdate(['--removeShortcut', exe])
+  else app.quit()
+  return true
+}
+const squirrelEvent = handleSquirrelEvent()
 
 // The slim and full editions must not share userData. In packaged builds the
 // userData path already derives from productName, but in dev both editions run
@@ -122,7 +143,15 @@ function registerIpc(): void {
   })
   ipcMain.handle('engine:install', (_e, variantId) => {
     requireLocal()
-    return installEngine(str(variantId, 'variant'), (p: EngineInstallProgress) => send('engine:progress', p))
+    const id = str(variantId, 'variant')
+    return installEngine(
+      id,
+      (p: EngineInstallProgress) => send('engine:progress', p),
+      // Replacing the binaries of a running engine fails on Windows and is unsafe elsewhere.
+      async () => {
+        if (server.status().state !== 'stopped') await server.stop()
+      }
+    )
   })
 
   ipcMain.handle('local:status', () => { requireLocal(); return server.status() })
@@ -196,6 +225,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  if (squirrelEvent) return
   registerImageProtocol()
   registerIpc()
   createWindow()

@@ -9,6 +9,43 @@ import extractZip from 'extract-zip'
 import type { AppSettings, EngineInfo, EngineInstallProgress, EngineVariant } from '@shared/types'
 import variantsJson from './variants.json'
 
+function randomSuffix(): string {
+  return `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`
+}
+
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+  return typeof err === 'object' && err !== null && typeof (err as NodeJS.ErrnoException).code === 'string'
+}
+
+/**
+ * Moves a directory across paths, falling back to a recursive copy when the
+ * two live on different volumes (rename throws EXDEV).
+ */
+async function moveDirInto(src: string, dest: string): Promise<void> {
+  try {
+    await fs.rename(src, dest)
+  } catch (err) {
+    if (!isErrnoException(err) || err.code !== 'EXDEV') throw err
+    await fs.cp(src, dest, { recursive: true })
+    await fs.rm(src, { recursive: true, force: true })
+  }
+}
+
+/** Removes leftover `.staging-<variant>-*` / `.old-<variant>-*` dirs from a previous crashed install. */
+async function removeStaleSwapDirs(enginesRoot: string, variantId: string): Promise<void> {
+  let entries: string[]
+  try {
+    entries = await fs.readdir(enginesRoot)
+  } catch {
+    return
+  }
+  await Promise.all(
+    entries
+      .filter((n) => n.startsWith(`.staging-${variantId}-`) || n.startsWith(`.old-${variantId}-`))
+      .map((name) => fs.rm(path.join(enginesRoot, name), { recursive: true, force: true }))
+  )
+}
+
 export interface EngineVariantDef {
   id: string
   label: string
@@ -223,6 +260,8 @@ export interface InstallCoreOptions {
   release?: LatestRelease
   fetchImpl?: typeof fetch
   onProgress?: (p: EngineInstallProgress) => void
+  /** Called right before the installed dir is swapped out; stop any running server here. */
+  beforeReplace?: () => Promise<void>
 }
 
 export interface InstallCoreResult {
@@ -234,8 +273,10 @@ export interface InstallCoreResult {
 
 /**
  * Downloads (unless assetPath is given) the release asset for a variant,
- * extracts it, and atomically moves the directory containing sd-server into
- * <enginesRoot>/<variantId>, writing version.json alongside.
+ * extracts it, stages it inside the engines root and installs it atomically
+ * (old dir renamed aside, staging renamed into place, old dir removed on
+ * success / restored on failure) as <enginesRoot>/<variantId>, with
+ * version.json alongside.
  */
 export async function installEngineCore(opts: InstallCoreOptions): Promise<InstallCoreResult> {
   const { variantId, platform, enginesRoot, tmpRoot, onProgress } = opts
@@ -271,11 +312,47 @@ export async function installEngineCore(opts: InstallCoreOptions): Promise<Insta
   )
 
   const engineDir = path.join(enginesRoot, variantId)
-  await fs.rm(engineDir, { recursive: true, force: true })
-  await fs.mkdir(path.dirname(engineDir), { recursive: true })
-  await fs.rename(found.dir, engineDir)
-  await fs.rm(extractDir, { recursive: true, force: true })
-  if (!opts.assetPath) await fs.rm(path.dirname(assetPath), { recursive: true, force: true })
+  await fs.mkdir(enginesRoot, { recursive: true })
+  // A previously killed install may have left half-finished dirs behind.
+  await removeStaleSwapDirs(enginesRoot, variantId)
+
+  // Stage the new tree inside the engines root so the final swap is a
+  // same-volume rename (no EXDEV risk against tmpRoot).
+  const stagingDir = path.join(enginesRoot, `.staging-${variantId}-${randomSuffix()}`)
+  const oldDir = path.join(enginesRoot, `.old-${variantId}-${randomSuffix()}`)
+  let swapped = false
+  let oldAside = false
+  try {
+    await moveDirInto(found.dir, stagingDir)
+    // Give the caller a chance to stop a running server before its files move.
+    await opts.beforeReplace?.()
+    try {
+      await fs.rename(engineDir, oldDir)
+      oldAside = true
+    } catch (err) {
+      if (!isErrnoException(err) || err.code !== 'ENOENT') throw err
+    }
+    try {
+      await fs.rename(stagingDir, engineDir)
+      swapped = true
+    } catch (err) {
+      if (oldAside) {
+        try {
+          await fs.rename(oldDir, engineDir)
+          oldAside = false
+        } catch {
+          // Could not restore; leave the `.old-` dir on disk (it is the only
+          // copy) instead of deleting it, and let the next install clean up.
+        }
+      }
+      throw err
+    }
+  } finally {
+    await fs.rm(stagingDir, { recursive: true, force: true })
+    if (oldAside) await fs.rm(oldDir, { recursive: true, force: true }) // not reached on failed restore
+    await fs.rm(extractDir, { recursive: true, force: true })
+    if (!opts.assetPath) await fs.rm(path.dirname(assetPath), { recursive: true, force: true })
+  }
   onProgress?.({ variantId, phase: 'done' })
   return { engineDir, serverPath: path.join(engineDir, serverBinaryName(platform)), cliPath: (await exists(path.join(engineDir, cliBinaryName(platform)))) ? path.join(engineDir, cliBinaryName(platform)) : null, tag: opts.release?.tag ?? ''}
 }
@@ -357,7 +434,11 @@ export async function getEngineInfo(settings: AppSettings): Promise<EngineInfo> 
 }
 
 /** Downloads + installs an engine variant, reporting progress through onProgress. */
-export async function installEngine(variantId: string, onProgress: (p: EngineInstallProgress) => void): Promise<void> {
+export async function installEngine(
+  variantId: string,
+  onProgress: (p: EngineInstallProgress) => void,
+  beforeReplace?: () => Promise<void>
+): Promise<void> {
   const def = ENGINE_VARIANTS.find((v) => v.id === variantId)
   if (!def || def.platform !== process.platform) {
     const msg = `Engine variant "${variantId}" is not available on this platform.`
@@ -375,7 +456,8 @@ export async function installEngine(variantId: string, onProgress: (p: EngineIns
       platform: process.platform,
       enginesRoot: enginesRoot(),
       tmpRoot: path.join(app.getPath('temp'), 'image-studio-engine-tmp'),
-      onProgress
+      onProgress,
+      beforeReplace
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

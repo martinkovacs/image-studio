@@ -1,7 +1,8 @@
 // Drives the sd-server process: spawn, args, readiness polling, native API
 // calls and progress parsing. Deliberately electron-free so it is unit-testable.
 import { EventEmitter } from 'node:events'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import net from 'node:net'
 import path from 'node:path'
 import fs from 'node:fs/promises'
@@ -19,25 +20,43 @@ export function splitShellArgs(input: string): string[] {
   let curIsQuoted = false
   let inSingle = false
   let inDouble = false
-  let escaped = false
   const push = () => {
     if (curIsQuoted || cur.length > 0) tokens.push(cur)
     cur = ''
     curIsQuoted = false
   }
-  for (const ch of input) {
-    if (escaped) {
-      cur += ch
-      escaped = false
-      continue
-    }
-    if (ch === '\\' && !inSingle) {
-      escaped = true
-      continue
-    }
+  const chars = [...input]
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i]
     if (inSingle) {
+      // Everything is literal inside single quotes; only the quote itself acts.
       if (ch === "'") inSingle = false
       else cur += ch
+      continue
+    }
+    if (ch === '\\') {
+      const next = chars[i + 1]
+      if (inDouble) {
+        // Inside double quotes a backslash only escapes `"` or `\`; otherwise both
+        // the backslash and the next character are literal.
+        if (next === '"' || next === '\\') {
+          cur += next
+          i++
+          continue
+        }
+        cur += ch
+        continue
+      }
+      // Outside quotes a backslash only escapes a quote, backslash or whitespace;
+      // anything else stays literal (so `C:\models\a.gguf` survives untouched).
+      const escapable = next === '"' || next === "'" || next === '\\' || next === ' ' || next === '\t' || next === '\n' || next === '\r'
+      if (next !== undefined && escapable) {
+        cur += next
+        if (next === '"' || next === "'") curIsQuoted = true
+        i++
+        continue
+      }
+      cur += ch
       continue
     }
     if (inDouble) {
@@ -55,15 +74,13 @@ export function splitShellArgs(input: string): string[] {
       curIsQuoted = true
       continue
     }
-    if (ch === ' ' || ch === '\t' || ch === '\n') {
-      if (!inSingle && !inDouble) {
-        push()
-        continue
-      }
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+      push()
+      continue
     }
     cur += ch
   }
-  if (inSingle || inDouble || escaped) throw new Error('unterminated quote or trailing backslash in extra args')
+  if (inSingle || inDouble) throw new Error('unterminated quote in extra args')
   push()
   return tokens
 }
@@ -113,6 +130,46 @@ export function splitOutputLines(chunk: string): string[] {
     .split(/\r\n|\n|\r/)
 }
 
+/**
+ * Per-stream line assembler. stdout/stderr chunks can split a `\r`-terminated
+ * progress frame or a multi-byte UTF-8 sequence: `push` decodes progressively
+ * (node:string_decoder) and only returns lines terminated by \r or \n, keeping
+ * the trailing incomplete segment for the next chunk. Call `end()` on stream
+ * close to flush what is left.
+ */
+export class OutputLineSplitter {
+  private readonly decoder = new StringDecoder('utf8')
+  private carry = ''
+
+  /** Feeds one raw chunk; returns the complete lines it revealed. */
+  push(chunk: Buffer): string[] {
+    const text = this.carry + this.decoder.write(chunk)
+    this.carry = ''
+    let lastBreak = -1
+    for (let i = text.length - 1; i >= 0; i--) {
+      const c = text.charCodeAt(i)
+      if (c === 10 || c === 13) {
+        lastBreak = i
+        break
+      }
+    }
+    if (lastBreak === -1) {
+      this.carry = text
+      return []
+    }
+    this.carry = text.slice(lastBreak + 1)
+    return splitOutputLines(text.slice(0, lastBreak + 1)).filter((l) => l !== '')
+  }
+
+  /** Flushes the trailing partial line; call once when the stream closes. */
+  end(): string[] {
+    const text = this.carry + this.decoder.end()
+    this.carry = ''
+    if (text === '') return []
+    return splitOutputLines(text).filter((l) => l !== '')
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Server error surfaces
 
@@ -148,9 +205,21 @@ interface JobJson {
   error?: { message?: string } | null
 }
 
-function abortError(): Error {
-  const e = new Error('image generation was cancelled')
+function abortError(message = 'image generation was cancelled'): Error {
+  const e = new Error(message)
   e.name = 'AbortError'
+  return e
+}
+
+/** AbortError carrying whether the native server actually interrupted the job. */
+export interface SdAbortError extends Error {
+  interrupted: boolean
+}
+
+function sdAbortError(interrupted: boolean): SdAbortError {
+  const e = new Error(interrupted ? 'image generation was cancelled' : 'image generation could not be interrupted (job already generating)') as SdAbortError
+  e.name = 'AbortError'
+  e.interrupted = interrupted
   return e
 }
 
@@ -175,6 +244,37 @@ function isPortFree(port: number): Promise<boolean> {
   })
 }
 
+/**
+ * Sends SIGTERM to a child process and resolves once it actually exited
+ * (SIGKILL after 5s as a fallback). Settles immediately for dead processes.
+ */
+function killChild(child: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve()
+    let settled = false
+    const done = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(killer)
+      resolve()
+    }
+    const killer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* already dead */
+      }
+    }, 5000)
+    child.once('close', done)
+    child.once('error', done)
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      done()
+    }
+  })
+}
+
 // ---------------------------------------------------------------------------
 // SdServer
 
@@ -191,6 +291,18 @@ export function parseStageLine(line: string): 'decoding' | 'hires' | 'sampling' 
   return null
 }
 
+export type SpawnImpl = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess
+
+/** Testability hooks for SdServer (everything else behaves exactly as shipped). */
+export interface SdServerOptions {
+  /** Process spawner; defaults to node:child_process.spawn. */
+  spawnImpl?: SpawnImpl
+  /** How long waitReady keeps polling /sdcpp/v1/capabilities. */
+  readyTimeoutMs?: number
+  /** Port availability probe; defaults to a TCP connect attempt against 127.0.0.1. */
+  portProbeImpl?: (port: number) => Promise<boolean>
+}
+
 export class SdServer extends EventEmitter {
   private child: ChildProcess | null = null
   private statusValue: ServerStatus = { state: 'stopped', profileId: null, port: null }
@@ -198,6 +310,24 @@ export class SdServer extends EventEmitter {
   private capsCache: SdCapabilities | null = null
   /** Model loading can take minutes; generations shouldn't hang forever. */
   private readyTimeoutMs = 15 * 60 * 1000
+  /** Monotonic generation counter; start() and stop() both bump it. */
+  private epoch = 0
+  /** Every start/stop runs serialized through this single chain. */
+  private queueTail: Promise<unknown> = Promise.resolve()
+  private inflight: { profileId: string; promise: Promise<ServerStatus> } | null = null
+  private stdoutLines = new OutputLineSplitter()
+  private stderrLines = new OutputLineSplitter()
+  /** Epoch that last wrote the visible status; aborted starts only reset it while they own it. */
+  private statusEpoch = -1
+  private readonly spawnImpl: SpawnImpl
+  private readonly portProbeImpl: (port: number) => Promise<boolean>
+
+  constructor(opts: SdServerOptions = {}) {
+    super()
+    this.spawnImpl = opts.spawnImpl ?? spawn
+    this.portProbeImpl = opts.portProbeImpl ?? isPortFree
+    if (opts.readyTimeoutMs !== undefined) this.readyTimeoutMs = opts.readyTimeoutMs
+  }
 
   status(): ServerStatus {
     return { ...this.statusValue }
@@ -211,26 +341,47 @@ export class SdServer extends EventEmitter {
   private setStatus(state: ServerStatus['state'], error?: string): ServerStatus {
     this.statusValue = { ...this.statusValue, state, ...(error !== undefined ? { error } : {}) }
     if (state === 'stopped') this.statusValue = { state, profileId: null, port: null, ...(error !== undefined ? { error } : {}) }
+    this.statusEpoch = this.epoch
     this.emit('status', { ...this.statusValue })
     return this.statusValue
   }
 
-  private handleExit(message: string): void {
+  private async waitExit(child: ChildProcess): Promise<void> {
+    await killChild(child)
+  }
+
+  private async doStop(): Promise<ServerStatus> {
     const child = this.child
     this.child = null
     this.capsCache = null
-    const last20 = this.logBuffer.slice(-20).join('\n')
-    const error = `${message}\n--- last log lines ---\n${last20}`
-    // Distinguish "crashed after we were ready" from "exited while starting".
-    if (child !== null && this.statusValue.state === 'ready') {
-      this.setStatus('error', error)
-    } else if (this.statusValue.state === 'starting') {
-      this.setStatus('error', error)
-    }
+    if (child) await this.waitExit(child)
+    this.statusValue = { state: 'stopped', profileId: null, port: null }
+    this.statusEpoch = this.epoch
+    this.emit('status', { ...this.statusValue })
+    return this.status()
   }
 
-  private handleOutput = (buf: Buffer): void => {
-    for (const raw of splitOutputLines(buf.toString('utf8'))) {
+  /** Bumps the epoch (invalidating any in-flight start) and queues the actual stop. */
+  private requestStop(): Promise<ServerStatus> {
+    this.epoch++
+    return this.enqueue(() => this.doStop())
+  }
+
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queueTail.then(fn, fn)
+    this.queueTail = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  private handleOutput = (lines: OutputLineSplitter, buf: Buffer): void => {
+    this.ingestLines(lines.push(buf))
+  }
+
+  private ingestLines(lines: string[]): void {
+    for (const raw of lines) {
       const line = raw.trimEnd()
       if (!line) continue
       if (this.isProgressLine(line)) {
@@ -258,37 +409,96 @@ export class SdServer extends EventEmitter {
 
   /**
    * Starts sd-server. Early return if already ready with the same profile.
-   * Kills any running instance otherwise. Waits until GET
-   * /sdcpp/v1/capabilities answers (model loading can take minutes).
+   * Concurrent callers for the same profile share one load instead of
+   * restarting it. All starts (and stops) are serialized through a single
+   * queue; starting a different profile aborts an in-flight one via the epoch
+   * counter. Waits until GET /sdcpp/v1/capabilities answers (model loading can
+   * take minutes). Aborting the signal behaves like stop(): the spawned
+   * process is killed, the state ends on 'stopped' and start() rejects with
+   * an 'AbortError'.
    */
-  async start(profile: LocalModelProfile, serverPath: string, port: number): Promise<ServerStatus> {
+  async start(
+    profile: LocalModelProfile,
+    serverPath: string,
+    port: number,
+    opts: { signal?: AbortSignal } = {}
+  ): Promise<ServerStatus> {
     if (this.statusValue.state === 'ready' && this.statusValue.profileId === profile.id) return this.status()
-    // Concurrent callers for the same profile share one load instead of restarting it.
     if (this.inflight?.profileId === profile.id) return this.inflight.promise
-    const promise = this.doStart(profile, serverPath, port).finally(() => {
+    if (opts.signal?.aborted) throw abortError('start was aborted')
+    this.epoch++
+    const promise = this.enqueue(() => this.doStart(profile, serverPath, port))
+    this.inflight = { profileId: profile.id, promise }
+    promise.catch(() => {}) // cleanup runs even when nobody listens
+    void promise.finally(() => {
       if (this.inflight?.promise === promise) this.inflight = null
     })
-    this.inflight = { profileId: profile.id, promise }
-    return promise
+    if (!opts.signal) return promise
+    const signal = opts.signal
+    return new Promise<ServerStatus>((resolve, reject) => {
+      const onAbort = () => {
+        // Same as stop(): kill whatever this start spawned, land on 'stopped'.
+        void this.requestStop()
+        reject(abortError('start was aborted'))
+      }
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+      promise.then(resolve, reject)
+    })
   }
 
-  private inflight: { profileId: string; promise: Promise<ServerStatus> } | null = null
+  /** Stops the running instance; wins over any in-flight start. */
+  async stop(): Promise<ServerStatus> {
+    return this.requestStop()
+  }
+
+  private abortedStartStatus(epoch: number): ServerStatus {
+    // Only reset the visible status while it still describes this (aborted) start.
+    if (this.statusEpoch === epoch) {
+      this.statusValue = { state: 'stopped', profileId: null, port: null }
+      this.statusEpoch = epoch
+      this.emit('status', { ...this.statusValue })
+    }
+    return this.status()
+  }
 
   private async doStart(profile: LocalModelProfile, serverPath: string, port: number): Promise<ServerStatus> {
-    if (this.statusValue.state !== 'stopped') await this.stop()
+    const epoch = this.epoch
+    const aborted = (): boolean => this.epoch !== epoch
+
+    // Tear down whatever instance is running before touching anything else.
+    const existing = this.child
+    if (existing) {
+      this.child = null
+      this.capsCache = null
+      await killChild(existing)
+    }
+    if (aborted()) return this.abortedStartStatus(epoch)
 
     if (!(await fileExists(serverPath))) return this.setStatus('error', `sd-server not found at ${serverPath}`)
+    if (aborted()) return this.abortedStartStatus(epoch)
     this.logBuffer.length = 0
+    this.stdoutLines = new OutputLineSplitter()
+    this.stderrLines = new OutputLineSplitter()
 
     // Pick a free port: walk upward from the requested one if busy.
-    let chosen = port
-    for (let i = 0; i < 200; i++) {
-      if (await isPortFree(chosen)) break
-      chosen++
+    let chosen = -1
+    for (let p = port; p < port + 200; p++) {
+      if (await this.portProbeImpl(p)) {
+        chosen = p
+        break
+      }
+      if (aborted()) return this.abortedStartStatus(epoch)
     }
+    if (chosen === -1) {
+      return this.setStatus('error', `sd-server could not start: no free port found (probed ${port}–${port + 199}, all busy)`)
+    }
+    if (aborted()) return this.abortedStartStatus(epoch)
     if (chosen !== port) this.pushPlainLog(`port ${port} is busy, using ${chosen} instead`)
     this.statusValue = { state: 'starting', profileId: profile.id, port: chosen }
+    this.statusEpoch = epoch
     this.emit('status', { ...this.statusValue })
+    if (aborted()) return this.abortedStartStatus(epoch)
 
     const binDir = path.dirname(serverPath)
     const env: NodeJS.ProcessEnv = { ...process.env }
@@ -300,7 +510,7 @@ export class SdServer extends EventEmitter {
 
     let child: ChildProcess
     try {
-      child = spawn(serverPath, buildServerArgs(profile, chosen), {
+      child = this.spawnImpl(serverPath, buildServerArgs(profile, chosen), {
         cwd: binDir,
         env,
         stdio: ['ignore', 'pipe', 'pipe']
@@ -309,23 +519,56 @@ export class SdServer extends EventEmitter {
       return this.setStatus('error', `failed to spawn sd-server: ${String(err)}`)
     }
     this.child = child
-    child.stdout?.on('data', this.handleOutput)
-    child.stderr?.on('data', this.handleOutput)
-    child.once('error', (err) => this.handleExit(`failed to start sd-server: ${err.message}`))
-    child.once('close', (code, signal) => {
-      if (this.statusValue.state === 'ready') {
-        this.handleExit(`sd-server crashed (exit code ${code ?? 'unknown'}${signal ? `, signal ${signal}` : ''})`)
-      } else if (this.statusValue.state === 'starting') {
-        const last20 = this.logBuffer.slice(-20).join('\n')
-        this.setStatus('error', `sd-server exited while starting (code ${code ?? 'unknown'}${signal ? `, signal ${signal}` : ''})\nlast log:\n${last20}`)
-      }
-    })
+    this.attachChildPipes(child)
+    this.attachExitHandlers(child, epoch)
 
-    const ready = await this.waitReady(chosen)
+    if (aborted()) {
+      // We spawned anyway (the epoch changed between checks): kill what we spawned.
+      await this.waitExit(child)
+      return this.abortedStartStatus(epoch)
+    }
+
+    const ready = await this.waitReady(chosen, epoch, child)
     if (!ready) return this.status()
+
     this.capsCache = null
     this.setStatus('ready')
     return this.status()
+  }
+
+  /** Output handlers must only act while their child is still the live one. */
+  private attachChildPipes(child: ChildProcess): void {
+    const out = this.stdoutLines
+    const err = this.stderrLines
+    child.stdout?.on('data', (b: Buffer) => this.handleOutput(out, b))
+    child.stderr?.on('data', (b: Buffer) => this.handleOutput(err, b))
+    child.once('close', () => {
+      // Flush any trailing partial line the child left without a terminator.
+      this.ingestLines(out.end())
+      this.ingestLines(err.end())
+    })
+  }
+
+  private attachExitHandlers(child: ChildProcess, epoch: number): void {
+    const aborted = (): boolean => this.epoch !== epoch
+    child.once('error', (err) => {
+      if (this.child === child) this.child = null
+      if (aborted()) return // intentional stop/replace: the stopping side owns the status
+      const last20 = this.logBuffer.slice(-20).join('\n')
+      if (this.statusValue.state === 'starting' || this.statusValue.state === 'ready') {
+        this.setStatus('error', `failed to start sd-server: ${err.message}\n--- last log lines ---\n${last20}`)
+      }
+    })
+    child.once('close', (code, signal) => {
+      if (this.child === child) this.child = null
+      if (aborted()) return
+      const detail = `(code ${code ?? 'unknown'}${signal ? `, signal ${signal}` : ''})`
+      if (this.statusValue.state === 'ready') {
+        this.setStatus('error', `sd-server crashed ${detail}\n--- last log lines ---\n${this.logBuffer.slice(-20).join('\n')}`)
+      } else if (this.statusValue.state === 'starting') {
+        this.setStatus('error', `sd-server exited while starting ${detail}\nlast log:\n${this.logBuffer.slice(-20).join('\n')}`)
+      }
+    })
   }
 
   private pushPlainLog(line: string): void {
@@ -334,52 +577,30 @@ export class SdServer extends EventEmitter {
     this.emit('log', line)
   }
 
-  private async waitReady(port: number): Promise<boolean> {
+  /**
+   * Polls GET /sdcpp/v1/capabilities until it answers, the child dies, the
+   * epoch changes (someone stopped/replaced this start) or the timeout fires.
+   */
+  private async waitReady(port: number, epoch: number, child: ChildProcess): Promise<boolean> {
     const startedAt = Date.now()
     const capsUrl = `http://127.0.0.1:${port}/sdcpp/v1/capabilities`
     while (Date.now() - startedAt < this.readyTimeoutMs) {
-      if (this.child === null) return false // already dead
+      if (this.epoch !== epoch || this.child !== child) return false
       try {
         const res = await fetch(capsUrl, { signal: AbortSignal.timeout(3000) })
         if (res.ok) return true
       } catch {
         // not ready yet (model still loading); keep polling
       }
+      if (this.epoch !== epoch || this.child !== child) return false
       await new Promise((r) => setTimeout(r, 500))
     }
-    this.handleExit(`timed out after ${Math.round(this.readyTimeoutMs / 1000)}s waiting for /sdcpp/v1/capabilities on port ${port}`)
+    if (this.epoch !== epoch || this.child !== child) return false
+    this.setStatus('error', `timed out after ${Math.round(this.readyTimeoutMs / 1000)}s waiting for /sdcpp/v1/capabilities on port ${port}`)
+    // Don't leak the process we timed out on.
+    if (this.child === child) this.child = null
+    await this.waitExit(child)
     return false
-  }
-
-  /** SIGTERM, then SIGKILL after 5s. */
-  async stop(): Promise<ServerStatus> {
-    const child = this.child
-    this.child = null
-    this.capsCache = null
-    if (child) {
-      await new Promise<void>((resolve) => {
-        const killer = setTimeout(() => {
-          try {
-            child.kill('SIGKILL')
-          } catch {
-            /* already dead */
-          }
-        }, 5000)
-        child.once('close', () => {
-          clearTimeout(killer)
-          resolve()
-        })
-        try {
-          child.kill('SIGTERM')
-        } catch {
-          clearTimeout(killer)
-          resolve()
-        }
-      })
-    }
-    this.statusValue = { state: 'stopped', profileId: null, port: null }
-    this.emit('status', { ...this.statusValue })
-    return this.status()
   }
 
   /** Server capabilities, cached for the lifetime of the started process. */
@@ -397,49 +618,85 @@ export class SdServer extends EventEmitter {
     }
   }
 
-  /** Runs one native img_gen job. Aborts are translated to `AbortError`. */
+  /**
+   * Runs one native img_gen job. On abort: POST /cancel for the job
+   * ("remember it and cancel as soon as the job id is known"), then reject with
+   * an SdAbortError — `interrupted: true` when the server cancelled the queued
+   * job (HTTP 200), `interrupted: false` when the job is already generating and
+   * the server answered 409 "cannot be interrupted yet".
+   */
   async imgGen(
     body: SdImgGenBody,
-    opts: { signal?: AbortSignal; onQueued?: (pos: number) => void } = {}
+    opts: { signal?: AbortSignal; onQueued?: (pos: number) => void; onState?: (state: 'queued' | 'generating') => void } = {}
   ): Promise<{ format: string; images: Buffer[] }> {
     const port = this.statusValue.port
     if (port === null) throw new Error('sd-server is not running')
     const signal = opts.signal
-    const jobIdRef: { current: string | null } = { current: null }
-    const aborts = signal ? new AbortRace(signal, () => {
-      if (jobIdRef.current) void cancelJob(port, jobIdRef.current)
-    }) : { promise: null as Promise<never> | null, dispose: () => {} }
+    let jobId: string | null = null
+    let aborted = false
+    let interrupted: boolean | null = null
+    let rejectAbort: ((e: SdAbortError) => void) | null = null
+    const abortPromise = new Promise<never>((_, reject) => {
+      rejectAbort = reject as (e: SdAbortError) => void
+    })
+    abortPromise.catch(() => {}) // stays unhandled-safe when nobody races it
+    const abortErr = (): SdAbortError => sdAbortError(interrupted ?? true)
+    const cancel = async (): Promise<void> => {
+      if (jobId === null || interrupted !== null) return
+      interrupted = await cancelJob(port, jobId)
+      rejectAborted()
+    }
+    const rejectAborted = (): void => {
+      if (rejectAbort) rejectAbort(abortErr())
+    }
+    const onAbortSignal = (): void => {
+      aborted = true
+      void cancel()
+    }
+    if (signal) {
+      if (signal.aborted) onAbortSignal()
+      else signal.addEventListener('abort', onAbortSignal, { once: true })
+    }
+    const raceAbort = <T>(p: Promise<T>): Promise<T> => (signal ? Promise.race([p, abortPromise]) : p)
     try {
-      const res = await raceWithAbort(
-        fetch(`http://127.0.0.1:${port}/sdcpp/v1/img_gen`, {
+      // Submit. Aborts before the submit response are only flagged: the job id
+      // is needed to cancel, so the submit fetch runs to completion.
+      const submitPromise = (async () => {
+        const res = await fetch(`http://127.0.0.1:${port}/sdcpp/v1/img_gen`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(15_000)
-        }),
-        aborts
-      )
-      if (!res.ok) throw await extractErrorMessage(res)
-      const submitted = (await res.json()) as { id?: string }
-      const jobId = submitted.id
-      if (!jobId) throw new Error('sd-server accepted the job but returned no job id')
-      jobIdRef.current = jobId
+        })
+        if (!res.ok) throw await extractErrorMessage(res)
+        const submitted = (await res.json()) as { id?: string }
+        const id = submitted.id
+        if (!id) throw new Error('sd-server accepted the job but returned no job id')
+        jobId = id
+        if (aborted) void cancel()
+        return id
+      })()
+      const id = await raceAbort(submitPromise)
 
+      let lastState: 'queued' | 'generating' | null = null
       while (true) {
-        const r = await raceWithAbort(
-          fetchJsonOrNull(`http://127.0.0.1:${port}/sdcpp/v1/jobs/${jobId}`, 10_000),
-          aborts
-        )
-        if (r.status === 404 || r.status === 410) throw new Error(`generation job ${jobId} is gone from the server (HTTP ${r.status})`)
+        const r = await raceAbort(fetchJsonOrNull(`http://127.0.0.1:${port}/sdcpp/v1/jobs/${id}`, 10_000))
+        if (r.status === 404 || r.status === 410) throw new Error(`generation job ${id} is gone from the server (HTTP ${r.status})`)
         if (!r.ok) throw await r.errorMessage()
         const job = r.json as JobJson
         const status = job.status ?? 'unknown'
         if (typeof job.queue_position === 'number' && opts.onQueued) opts.onQueued(job.queue_position)
+        if ((status === 'queued' || status === 'generating') && status !== lastState) {
+          lastState = status
+          opts.onState?.(status)
+        }
         if (status === 'queued' || status === 'generating') {
+          if (aborted && interrupted !== null) throw abortErr() // cancel already settled
           await sleep(400)
           continue
         }
         if (status === 'completed') {
+          if (aborted) throw abortErr()
           const result = job.result
           if (!result) throw new Error('sd-server reported the job as completed but returned no result')
           return {
@@ -447,31 +704,41 @@ export class SdServer extends EventEmitter {
             images: (result.images ?? []).map((im) => Buffer.from(im.b64_json ?? '', 'base64'))
           }
         }
-        if (status === 'cancelled') throw abortError()
+        if (status === 'cancelled') throw sdAbortError(interrupted ?? true)
         // failed / unknown
         throw new Error(job.error?.message ?? `generation job ended with status "${status}"`)
       }
     } finally {
-      aborts.dispose()
+      if (signal) signal.removeEventListener('abort', onAbortSignal)
     }
   }
 
   /** Runs an ESRGAN upscale (synchronous server endpoint). */
-  async upscale(body: {
-    image: string
-    upscaler?: string
-    repeats?: number
-    tile_size?: number
-    output_format?: string
-  }): Promise<{ image: Buffer; format: string; width: number; height: number; upscaler: string }> {
+  async upscale(
+    body: {
+      image: string
+      upscaler?: string
+      repeats?: number
+      tile_size?: number
+      output_format?: string
+    },
+    opts: { signal?: AbortSignal } = {}
+  ): Promise<{ image: Buffer; format: string; width: number; height: number; upscaler: string }> {
     const port = this.statusValue.port
     if (port === null) throw new Error('sd-server is not running')
-    const res = await fetch(`http://127.0.0.1:${port}/sdcpp/v1/upscale`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10 * 60 * 1000)
-    })
+    const signal = opts.signal
+    let res: Response
+    try {
+      res = await fetch(`http://127.0.0.1:${port}/sdcpp/v1/upscale`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10 * 60 * 1000)]) : AbortSignal.timeout(10 * 60 * 1000)
+      })
+    } catch (err) {
+      if (signal?.aborted) throw abortError('upscale was cancelled')
+      throw err
+    }
     if (!res.ok) throw await extractErrorMessage(res)
     const json = (await res.json()) as {
       images?: { b64_json?: string }[]
@@ -577,52 +844,30 @@ async function fetchJsonOrNull(requestUrl: string, timeoutMs: number): Promise<P
   }
 }
 
-function raceWithAbort<T>(p: Promise<T>, abort: { promise: Promise<never> | null }): Promise<T> {
-  if (!abort.promise) return p
-  return Promise.race([p, abort.promise])
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
 /**
- * Wraps an AbortSignal into a pending never-resolving promise so callers can
- * `Promise.race` any computation against cancellation.
+ * POST /sdcpp/v1/jobs/{id}/cancel. Returns true when the job actually left the
+ * pipeline (2xx, or 404/410 — gone either way), false only for the HTTP 409
+ * "job is currently generating and cannot be interrupted yet" answer of the
+ * native server (see routes_sdcpp.cpp).
  */
-class AbortRace {
-  private rejectFn: ((reason: Error) => void) | null = null
-  private readonly signal: AbortSignal
-  readonly promise: Promise<never> | null
-  listener?: () => void
-
-  constructor(signal: AbortSignal, onAbort?: () => void) {
-    this.signal = signal
-    this.promise = new Promise<never>((_, reject) => {
-      this.rejectFn = (reason: Error) => reject(reason)
-      this.listener = () => {
-        try {
-          onAbort?.()
-        } catch {
-          /* best effort */
-        }
-        this.rejectFn?.(abortError())
-      }
-      if (signal.aborted) this.listener()
-      else signal.addEventListener('abort', this.listener, { once: true })
-    })
-  }
-
-  dispose(): void {
-    if (this.listener) this.signal.removeEventListener('abort', this.listener)
-  }
-}
-
-/** Runs POST /sdcpp/v1/jobs/{id}/cancel; resolves regardless of errors. */
-async function cancelJob(port: number, jobId: string): Promise<void> {
+async function cancelJob(port: number, jobId: string): Promise<boolean> {
   try {
-    await fetch(`http://127.0.0.1:${port}/sdcpp/v1/jobs/${jobId}/cancel`, { method: 'POST', signal: AbortSignal.timeout(5000) })
+    const res = await fetch(`http://127.0.0.1:${port}/sdcpp/v1/jobs/${jobId}/cancel`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(5000)
+    })
+    if (res.ok) return true
+    if (res.status === 409) {
+      const raw = await res.text().catch(() => '')
+      // A 409 with "job queue state changed..." means the job left the queue on its own.
+      return !/cannot be interrupted/i.test(raw)
+    }
+    return true // 404 / 410: the job is gone, nothing keeps generating
   } catch {
-    // best effort; the caller already abandoned the job
+    return true // best effort; the caller already abandoned the job
   }
 }
