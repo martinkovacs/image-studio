@@ -134,7 +134,7 @@ export function StudioView() {
                   placeholder="Negative prompt (leave blank for Qwen-Image / Flux)"
                 />
               ) : (
-                <button onClick={() => setShowNeg(true)} className="self-start text-[11px] text-ink-400 hover:text-safelight">
+                <button onClick={() => setShowNeg(true)} className="self-start text-[11px] text-ink-300 hover:text-safelight">
                   + negative prompt
                 </button>
               ))}
@@ -185,7 +185,7 @@ export function StudioView() {
             </Button>
           )}
           {jobCount > 0 && (
-            <p className="mt-2 text-center font-mono text-[10px] text-ink-400">
+            <p className="mt-2 text-center font-mono text-[10px] text-ink-300">
               {jobCount} running{local && serverState === 'starting' ? ' · loading model…' : ''}
             </p>
           )}

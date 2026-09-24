@@ -35,7 +35,7 @@ function Row({ label, desc, children }: { label: string; desc?: string; children
     <div className="flex items-center justify-between gap-6">
       <div>
         <div className="text-[13px] text-ink-100">{label}</div>
-        {desc && <div className="mt-0.5 max-w-md text-[12px] leading-snug text-ink-500">{desc}</div>}
+        {desc && <div className="mt-0.5 max-w-md text-[12px] leading-snug text-ink-300">{desc}</div>}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -144,7 +144,7 @@ function OpenRouterTab() {
             </Button>
           </div>
         )}
-        <p className="text-[12px] text-ink-500">
+        <p className="text-[12px] text-ink-300">
           Create a key at{' '}
           <a href="https://openrouter.ai/keys" target="_blank" className="text-safelight hover:underline">
             openrouter.ai/keys
@@ -170,7 +170,7 @@ function OpenRouterTab() {
         />
       </Card>
       <Card title="4K output">
-        <p className="text-[12px] leading-relaxed text-ink-400">
+        <p className="text-[12px] leading-relaxed text-ink-300">
           OpenRouter's Image API normalizes size as <code className="font-mono text-ink-200">resolution</code> tiers (512 · 1K · 2K · 4K) plus{' '}
           <code className="font-mono text-ink-200">aspect_ratio</code>. Each model declares which tiers it supports; the studio only offers those. Models without
           a 4K tier top out at 1K/2K or only accept an aspect ratio. For those, use a 4K-capable model, or upscale locally.
@@ -181,7 +181,7 @@ function OpenRouterTab() {
               {m.id}
             </span>
           ))}
-          {fourK.length === 0 && <span className="text-[12px] text-ink-500">Model list not loaded.</span>}
+          {fourK.length === 0 && <span className="text-[12px] text-ink-300">Model list not loaded.</span>}
         </div>
       </Card>
     </>
@@ -235,9 +235,9 @@ function EngineTab() {
     <>
       <Card
         title="stable-diffusion.cpp"
-        aside={<span className="font-mono text-[11px] text-ink-500">latest {info?.latestVersion ?? '…'}</span>}
+        aside={<span className="font-mono text-[11px] text-ink-300">latest {info?.latestVersion ?? '…'}</span>}
       >
-        <p className="text-[12px] leading-relaxed text-ink-400">
+        <p className="text-[12px] leading-relaxed text-ink-300">
           The app runs <code className="font-mono text-ink-200">sd-server</code> from stable-diffusion.cpp locally. Pick the build for your GPU. Vulkan works on NVIDIA,
           AMD and Intel; CUDA is usually fastest on NVIDIA.
         </p>
@@ -259,7 +259,7 @@ function EngineTab() {
                   />
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] text-ink-100">{v.label}</div>
-                    <div className="font-mono text-[10px] text-ink-500">
+                    <div className="font-mono text-[10px] text-ink-300">
                       {v.bundled && (v.installed ? 'bundled · ' : 'bundled')}
                       {v.installed ? `installed ${v.installedVersion ?? ''}` : v.bundled ? '' : 'not installed'}
                     </div>
@@ -270,7 +270,7 @@ function EngineTab() {
                       {v.installed ? (v.installedVersion !== info.latestVersion ? 'Update' : 'Reinstall') : 'Install'}
                     </Button>
                   ) : (
-                    <span className="font-mono text-[10px] text-ink-500">source build</span>
+                    <span className="font-mono text-[10px] text-ink-300">source build</span>
                   )}
                 </div>
                 {busy && (
@@ -278,14 +278,14 @@ function EngineTab() {
                     <div className="h-[3px] flex-1 overflow-hidden rounded-full bg-ink-700">
                       <div className="h-full bg-safelight transition-[width]" style={{ width: `${pct ?? 100}%` }} />
                     </div>
-                    <span className="font-mono text-[10px] text-ink-400">
+                    <span className="font-mono text-[10px] text-ink-300">
                       {p.phase === 'extracting' ? 'extracting' : `${((p.received ?? 0) / 1e6).toFixed(0)}${p.total ? ` / ${(p.total / 1e6).toFixed(0)}` : ''} MB`}
                     </span>
                   </div>
                 )}
                 {p?.phase === 'error' && <p className="pl-7 text-[11px] text-stop">{p.error}</p>}
                 {v.id === 'linux-cuda-source' && (
-                  <div className="flex flex-col gap-1.5 pl-7 text-[12px] text-ink-500">
+                  <div className="flex flex-col gap-1.5 pl-7 text-[12px] text-ink-300">
                     No official Linux CUDA build exists. Build it once (needs the CUDA toolkit, cmake and git); it installs here automatically:
                     <CodeLine text="npm run build-sdcpp-cuda" />
                   </div>
@@ -379,7 +379,7 @@ function ProfilesTab() {
 
   return (
     <>
-      <p className="text-[13px] leading-relaxed text-ink-400">
+      <p className="text-[13px] leading-relaxed text-ink-300">
         A profile tells sd.cpp which weight files to load and how. It works with any model family sd.cpp supports; once loaded, the model's own sampler and
         size defaults appear in the studio.
       </p>
@@ -407,7 +407,7 @@ function ProfilesTab() {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="truncate font-display text-[14px] font-semibold text-ink-100">{p.name}</div>
-                  <div className="truncate font-mono text-[10px] text-ink-500">{mainFile(p) || 'no model file'}</div>
+                  <div className="truncate font-mono text-[10px] text-ink-300">{mainFile(p) || 'no model file'}</div>
                 </div>
                 {active && <span className="rounded bg-safelight/15 px-1.5 py-0.5 font-mono text-[10px] text-safelight">active</span>}
               </div>
@@ -427,7 +427,7 @@ function ProfilesTab() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="text-ink-500 hover:text-stop"
+                  className="text-ink-300 hover:text-stop"
                   onClick={async () => {
                     if (!confirm(`Delete profile "${p.name}"? Model files are not touched.`)) return
                     await saveProfiles(profiles.filter((x) => x.id !== p.id))
@@ -442,7 +442,7 @@ function ProfilesTab() {
         })}
         <button
           onClick={() => setEditing({ id: uid(), name: '', args: {}, extraArgs: '' })}
-          className="flex min-h-28 items-center justify-center rounded-lg border border-dashed border-ink-700 text-[13px] text-ink-400 hover:border-safelight/60 hover:text-ink-100"
+          className="flex min-h-28 items-center justify-center rounded-lg border border-dashed border-ink-700 text-[13px] text-ink-300 hover:border-safelight/60 hover:text-ink-100"
         >
           + New profile
         </button>
@@ -519,7 +519,7 @@ export function SettingsView() {
             onClick={() => setTab(t.id)}
             className={cx(
               'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px]',
-              tab === t.id ? 'bg-ink-800 text-ink-100' : 'text-ink-400 hover:bg-ink-850 hover:text-ink-200'
+              tab === t.id ? 'bg-ink-800 text-ink-100' : 'text-ink-300 hover:bg-ink-850 hover:text-ink-200'
             )}
           >
             <span className={tab === t.id ? 'text-safelight' : ''}>{t.icon}</span>

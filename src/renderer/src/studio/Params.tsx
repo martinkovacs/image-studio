@@ -40,7 +40,7 @@ export function OpenRouterParams({ model }: { model: OrImageModel | undefined })
   const entries = Object.entries(model.supported_parameters).filter(
     ([k, spec]) => !['resolution', 'aspect_ratio', 'input_references'].includes(k) && !(spec.type === 'range' && spec.min === spec.max)
   )
-  if (entries.length === 0) return <p className="text-xs text-ink-500">No tunable parameters for this model.</p>
+  if (entries.length === 0) return <p className="text-xs text-ink-300">No tunable parameters for this model.</p>
   const params = orParams as Record<string, unknown>
   return (
     <>
@@ -108,14 +108,14 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
   return (
     <>
       {!caps && (
-        <p className="rounded-md border border-ink-800 bg-ink-900 p-2.5 text-[11px] leading-snug text-ink-400">
+        <p className="rounded-md border border-ink-800 bg-ink-900 p-2.5 text-[11px] leading-snug text-ink-300">
           Load the model to see its defaults, samplers and limits. Parameters left untouched use the model's own defaults from sd.cpp.
         </p>
       )}
       <div className="flex items-center justify-between">
-        <span className="font-mono text-[10px] text-ink-500">{overridden ? 'custom values' : 'model defaults'}</span>
+        <span className="font-mono text-[10px] text-ink-300">{overridden ? 'custom values' : 'model defaults'}</span>
         {overridden && (
-          <button onClick={reset} className="flex items-center gap-1 text-[11px] text-ink-400 hover:text-safelight">
+          <button onClick={reset} className="flex items-center gap-1 text-[11px] text-ink-300 hover:text-safelight">
             <RotateCcw size={11} /> Reset to model defaults
           </button>
         )}
@@ -246,9 +246,9 @@ export function LoraSection() {
   const available = caps?.loras ?? []
   const setLoras = (l: NonNullable<P['lora']>) => patch({ lora: l })
   return (
-    <Section title="LoRA" defaultOpen={loras.length > 0} aside={<span className="font-mono text-[10px] text-ink-500">{loras.length || ''}</span>}>
+    <Section title="LoRA" defaultOpen={loras.length > 0} aside={<span className="font-mono text-[10px] text-ink-300">{loras.length || ''}</span>}>
       {available.length === 0 ? (
-        <p className="text-[11px] text-ink-500">Set a LoRA directory in the model profile to use LoRAs.</p>
+        <p className="text-[11px] text-ink-300">Set a LoRA directory in the model profile to use LoRAs.</p>
       ) : (
         <>
           {loras.map((l, i) => (
@@ -260,7 +260,7 @@ export function LoraSection() {
                   onChange={(v) => setLoras(loras.map((x, j) => (j === i ? { ...x, path: v } : x)))}
                   options={available.map((a) => ({ value: a.path, label: a.name }))}
                 />
-                <button onClick={() => setLoras(loras.filter((_, j) => j !== i))} className="px-1 text-ink-500 hover:text-stop">
+                <button onClick={() => setLoras(loras.filter((_, j) => j !== i))} className="px-1 text-ink-300 hover:text-stop">
                   <Trash2 size={13} />
                 </button>
               </div>
@@ -292,7 +292,7 @@ export function HiresSection() {
   const th = h.target_height || Math.round(ht * scale)
   return (
     <Section title="Hires fix" defaultOpen={!!h.enabled} aside={<Toggle checked={!!h.enabled} onChange={(v) => setH({ enabled: v })} />}>
-      <p className="text-[11px] leading-snug text-ink-500">
+      <p className="text-[11px] leading-snug text-ink-300">
         Generates at the base size, then upscales and re-samples. The usual way to reach 4K with local models without duplicated subjects.
       </p>
       <Field label="Upscaler">
@@ -323,7 +323,7 @@ export function HiresSection() {
           <NumberInput value={h.target_height ?? 0} min={0} onChange={(v) => setH({ target_height: v ?? 0 })} />
         </Field>
       </div>
-      <div className="font-mono text-[11px] text-ink-400">
+      <div className="font-mono text-[11px] text-ink-300">
         → {tw}×{th} ({((tw * th) / 1e6).toFixed(1)} MP)
       </div>
       <SliderField label="Denoise" hint="How much the second pass may change the image." min={0} max={1} step={0.01} value={h.denoising_strength} onChange={(v) => setH({ denoising_strength: v })} />
@@ -347,7 +347,7 @@ export function VaeTilingSection() {
   const setT = (v: NonNullable<P['vae_tiling_params']>) => patch({ vae_tiling_params: v })
   return (
     <Section title="VAE tiling" defaultOpen={!!t.enabled} aside={<Toggle checked={!!t.enabled} onChange={(v) => setT({ enabled: v })} />}>
-      <p className="text-[11px] leading-snug text-ink-500">Decodes in tiles to cut VAE memory. Needed for most 2K+ images on ≤16 GB GPUs.</p>
+      <p className="text-[11px] leading-snug text-ink-300">Decodes in tiles to cut VAE memory. Needed for most 2K+ images on ≤16 GB GPUs.</p>
       <div className="grid grid-cols-2 gap-2">
         <Field label="Tile X" hint="0 = auto">
           <NumberInput value={t.tile_size_x} min={0} onChange={(v) => setT({ tile_size_x: v })} />

@@ -118,7 +118,7 @@ function ThreadList({
                 await window.api.history.deleteThread(t.id)
                 onChanged()
               }}
-              className="hidden text-ink-500 hover:text-stop group-hover:block"
+              className="hidden text-ink-300 hover:text-stop group-hover:block"
             >
               <Trash2 size={12} />
             </button>
@@ -175,7 +175,7 @@ function Message({ item, onEdit }: { item: HistoryItem; onEdit: (path: string) =
             </div>
           ))}
         </div>
-        <span className="font-mono text-[10px] text-ink-500">
+        <span className="font-mono text-[10px] text-ink-300">
           {item.model.split('/').pop()} · {item.width}×{item.height}
           {item.seed != null && ` · seed ${item.seed}`} · {formatDuration(item.durationMs)}
           {cost && ` · ${cost}`}
@@ -320,7 +320,7 @@ export function ChatView() {
                 <h1 className="font-display text-4xl font-semibold tracking-tight text-ink-100">
                   What should we <span className="text-safelight">develop</span>?
                 </h1>
-                <p className="max-w-md text-sm text-ink-400">Describe an image, or attach one and say how to change it. Each reply builds on the last image.</p>
+                <p className="max-w-md text-sm text-ink-300">Describe an image, or attach one and say how to change it. Each reply builds on the last image.</p>
                 <div className="grid max-w-2xl grid-cols-2 gap-2">
                   {EXAMPLES.map((ex) => (
                     <button
@@ -384,7 +384,7 @@ export function ChatView() {
                 {autoAttach && lastOutput && (
                   <div className="flex items-center gap-2" title="The last image is attached automatically">
                     <img src={imgUrl(lastOutput)} className="h-14 w-14 rounded-lg border border-dashed border-safelight/60 object-cover opacity-80" />
-                    <span className="font-mono text-[10px] text-ink-500">editing last image</span>
+                    <span className="font-mono text-[10px] text-ink-300">editing last image</span>
                   </div>
                 )}
               </div>
@@ -421,7 +421,7 @@ export function ChatView() {
                   }
                 }}
                 placeholder={autoAttach ? 'Describe the next change…' : 'Describe an image…'}
-                className="max-h-48 min-h-9 flex-1 resize-none bg-transparent px-2 py-2 text-[14px] leading-[22px] text-ink-100 outline-none placeholder:text-ink-500"
+                className="max-h-48 min-h-9 flex-1 resize-none bg-transparent px-2 py-2 text-[14px] leading-[22px] text-ink-100 outline-none placeholder:text-ink-300"
               />
               <button
                 onClick={() => void send()}

@@ -49,7 +49,7 @@ export function JobProgress({ job, compact }: { job: Job; compact?: boolean }) {
           <span className="text-safelight">●</span> {stage === 'sampling' && p?.message ? p.message : (stageLabel[stage] ?? stage)}
           {p?.step != null && p.totalSteps ? ` ${p.step}/${p.totalSteps}` : ''}
         </span>
-        <span className="text-ink-500">{formatDuration(Date.now() - job.startedAt)}</span>
+        <span className="text-ink-300">{formatDuration(Date.now() - job.startedAt)}</span>
       </div>
       <div className="relative h-[3px] overflow-hidden rounded-full bg-ink-700">
         {pct !== undefined ? (
@@ -58,9 +58,9 @@ export function JobProgress({ job, compact }: { job: Job; compact?: boolean }) {
           <div className="absolute inset-y-0 w-1/3 animate-[pulse_1.2s_ease-in-out_infinite] bg-safelight/70" />
         )}
       </div>
-      <div className="flex items-center justify-between font-mono text-[10px] text-ink-500">
+      <div className="flex items-center justify-between font-mono text-[10px] text-ink-300">
         <span className="truncate">{p?.speed ?? job.label}</span>
-        <button onClick={() => void cancel(job.id)} className="text-ink-400 hover:text-stop">
+        <button onClick={() => void cancel(job.id)} className="text-ink-300 hover:text-stop">
           cancel
         </button>
       </div>
@@ -208,7 +208,7 @@ function MaskPainter({ src }: { src: string }) {
           onChange={(e) => setBrush(Number(e.target.value))}
           className="mx-1 w-28"
         />
-        <span className="w-8 font-mono text-[10px] text-ink-400">{brush}px</span>
+        <span className="w-8 font-mono text-[10px] text-ink-300">{brush}px</span>
         <IconButton title="Invert mask" onClick={() => fill('invert')}>
           <PaintBucket size={14} />
         </IconButton>
@@ -377,7 +377,7 @@ export function Canvas() {
         )}
 
         {src && natural && (
-          <div className="absolute bottom-4 left-4 flex items-center gap-1 rounded-md border border-ink-800 bg-ink-900/90 px-1 font-mono text-[10px] text-ink-400">
+          <div className="absolute bottom-4 left-4 flex items-center gap-1 rounded-md border border-ink-800 bg-ink-900/90 px-1 font-mono text-[10px] text-ink-300">
             <button className="px-1.5 py-1 hover:text-ink-100" onClick={reset} title="Fit">
               <Maximize size={11} />
             </button>
@@ -398,7 +398,7 @@ export function Canvas() {
             <p className="truncate text-[12px] text-ink-200 select-text" title={item.prompt}>
               {item.prompt}
             </p>
-            <p className="truncate font-mono text-[10px] text-ink-500">
+            <p className="truncate font-mono text-[10px] text-ink-300">
               {item.model} · {item.width}×{item.height}
               {item.seed != null && ` · seed ${item.seed}`} · {formatDuration(item.durationMs)}
               {formatCost(item.costUsd) && ` · ${formatCost(item.costUsd)}`}

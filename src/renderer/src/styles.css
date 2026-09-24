@@ -104,7 +104,8 @@ body::after {
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--color-ink-400);
+  /* ink-300: ink-400 only reaches 4.2:1 on panel backgrounds in the dark theme. */
+  color: var(--color-ink-300);
 }
 
 @keyframes develop {

@@ -37,7 +37,7 @@ function Tile({ item, selected }: { item: HistoryItem; selected: boolean }) {
       )}
       <span className="absolute inset-x-0 bottom-0 hidden bg-gradient-to-t from-ink-950/95 to-transparent px-1.5 pb-1 pt-4 text-left group-hover:block">
         <span className="block truncate font-mono text-[9px] text-ink-200">{item.model.split('/').pop()}</span>
-        <span className="block font-mono text-[9px] text-ink-400">{timeAgo(item.createdAt)}</span>
+        <span className="block font-mono text-[9px] text-ink-300">{timeAgo(item.createdAt)}</span>
       </span>
     </button>
   )
@@ -85,7 +85,7 @@ export function HistoryStrip() {
       <div className="flex flex-col gap-2 border-b border-ink-800 px-3 py-2.5">
         <div className="flex items-baseline justify-between">
           <span className="font-display text-[13px] font-semibold text-ink-200">History</span>
-          <span className="font-mono text-[10px] text-ink-500">{history.length}</span>
+          <span className="font-mono text-[10px] text-ink-300">{history.length}</span>
         </div>
         {!SLIM && (
         <Segmented<Filter>
