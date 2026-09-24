@@ -3,19 +3,41 @@ import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { IMG_PROTOCOL } from '@shared/types'
 import type { EngineInstallProgress, GenerationProgress, GenerationRequest, UpscaleRequest } from '@shared/types'
+import { IS_SLIM } from '@shared/edition'
 import { getOpenRouterKey, getSettings, setOpenRouterKey, updateSettings } from './settings'
 import { getCredits, listImageModels } from './openrouter'
 import { HistoryStore } from './history'
-import { createGenerator, readFileAsDataUrl } from './generate'
+import { createGenerator, localDisabled, readFileAsDataUrl } from './generate'
 import { getEngineInfo, installEngine, resolveServerPath } from './sdcpp/engine'
 import { listDevices, SdServer } from './sdcpp/server'
+
+// The slim and full editions must not share userData. In packaged builds the
+// userData path already derives from productName, but in dev both editions run
+// with the same app name — rename before anything reads userData.
+if (IS_SLIM) app.setName('Image Studio Lite')
+
+/** A server stand-in used when the real SdServer is never constructed (slim). */
+const absentServer = {
+  status: () => ({ state: 'stopped', profileId: null, port: null }),
+  start: async () => { throw localDisabled() },
+  imgGen: async () => { throw localDisabled() },
+  upscale: async () => { throw localDisabled() },
+  on: () => undefined,
+  off: () => undefined
+}
 
 protocol.registerSchemesAsPrivileged([
   { scheme: IMG_PROTOCOL, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
 ])
 
 let win: BrowserWindow | null = null
-const server = new SdServer()
+// Guard: rejects every local-only code path in the slim edition.
+function requireLocal(): void {
+  if (IS_SLIM) throw localDisabled()
+}
+// The sd-server process is only ever constructed (and later spawned) in the
+// full edition; the stub above reports "stopped" if something ever touches it.
+const server: SdServer = IS_SLIM ? (absentServer as unknown as SdServer) : new SdServer()
 const history = new HistoryStore(join(app.getPath('userData'), 'history'))
 
 const send = (channel: string, payload: unknown): void => {
@@ -81,13 +103,18 @@ function registerIpc(): void {
     return key ? getCredits(key) : null
   })
 
-  ipcMain.handle('engine:info', () => getEngineInfo(getSettings()))
-  ipcMain.handle('engine:install', (_e, variantId) =>
-    installEngine(str(variantId, 'variant'), (p: EngineInstallProgress) => send('engine:progress', p))
-  )
+  ipcMain.handle('engine:info', () => {
+    requireLocal()
+    return getEngineInfo(getSettings())
+  })
+  ipcMain.handle('engine:install', (_e, variantId) => {
+    requireLocal()
+    return installEngine(str(variantId, 'variant'), (p: EngineInstallProgress) => send('engine:progress', p))
+  })
 
-  ipcMain.handle('local:status', () => server.status())
+  ipcMain.handle('local:status', () => { requireLocal(); return server.status() })
   ipcMain.handle('local:start', async (_e, profileId) => {
+    requireLocal()
     const settings = getSettings()
     const profile = settings.local.profiles.find((p) => p.id === profileId)
     if (!profile) throw new Error('Unknown model profile')
@@ -96,17 +123,21 @@ function registerIpc(): void {
     await updateSettings({ local: { activeProfileId: profile.id } })
     return server.start(profile, path, settings.local.listenPort)
   })
-  ipcMain.handle('local:stop', () => server.stop())
-  ipcMain.handle('local:capabilities', () => server.capabilities())
-  ipcMain.handle('local:logs', () => server.logs())
+  ipcMain.handle('local:stop', () => { requireLocal(); return server.stop() })
+  ipcMain.handle('local:capabilities', () => { requireLocal(); return server.capabilities() })
+  ipcMain.handle('local:logs', () => { requireLocal(); return server.logs() })
   ipcMain.handle('local:listDevices', async () => {
+    requireLocal()
     const path = await resolveServerPath(getSettings())
     return path ? listDevices(path) : []
   })
 
   ipcMain.handle('gen:run', (_e, jobId, req: GenerationRequest) => generator.run(str(jobId, 'jobId'), req))
   ipcMain.handle('gen:cancel', (_e, jobId) => generator.cancel(str(jobId, 'jobId')))
-  ipcMain.handle('gen:upscale', (_e, jobId, req: UpscaleRequest) => generator.upscale(str(jobId, 'jobId'), req))
+  ipcMain.handle('gen:upscale', (_e, jobId, req: UpscaleRequest) => {
+    requireLocal()
+    return generator.upscale(str(jobId, 'jobId'), req)
+  })
 
   ipcMain.handle('history:list', (_e, opts) => history.list(opts ?? {}))
   ipcMain.handle('history:remove', (_e, id) => history.remove(str(id, 'id'), { deleteFiles: true }))

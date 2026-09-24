@@ -16,7 +16,12 @@ import type {
   UpscaleRequest,
 } from '../shared/types'
 import type { HistoryStore } from './history'
-import { CancelledError, generateImages } from './openrouter'
+import { generateImages, CancelledError } from './openrouter'
+import { IS_SLIM } from '../shared/edition'
+
+/** Message used for every disabled local feature in the slim edition. */
+export const LOCAL_DISABLED_MSG = 'Local generation is not available in the slim edition'
+export const localDisabled = (): Error => new Error(LOCAL_DISABLED_MSG)
 
 export interface SdServerLike {
   status(): ServerStatus
@@ -196,6 +201,9 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     ac: AbortController,
     startedAt: number,
   ): Promise<GenerationResult> {
+    // The slim edition has no local backend at all: report it as a failed job
+    // instead of touching the (absent) server.
+    if (IS_SLIM) return { ok: false, jobId, error: LOCAL_DISABLED_MSG }
     emit(jobId, { stage: 'loading', message: 'Ensuring local engine is ready' })
     const { profile } = await ensureServerRunning(jobId)
 
@@ -272,6 +280,7 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     async upscale(jobId, req): Promise<GenerationResult> {
       const startedAt = Date.now()
       return withJob(jobId, async () => {
+        if (IS_SLIM) return { ok: false, jobId, error: LOCAL_DISABLED_MSG }
         const item = await deps.history.get(req.historyId)
         if (!item) throw new Error(`History item not found: ${req.historyId}`)
         const file = item.files[req.fileIndex]
