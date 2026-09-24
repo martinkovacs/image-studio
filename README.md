@@ -36,7 +36,7 @@ Profile templates only pre-fill which **weight-file slots** matter for a model f
 **Local**: long-edge presets up to 4096 with snapping to 8/16/32/64 multiples, and a warning above ~4 MP (most machines will be slow or OOM there). The recommended path to 4K:
 
 1. Generate near the model's native size.
-2. Upscale via **Hires fix** (set target "4K long edge") or the **ESRGAN Upscale** tool — put ESRGAN `.bin` models in the profile's upscaler directory (`hires-upscalers-dir`).
+2. Upscale via **Hires fix** (set target "4K long edge") or the **ESRGAN Upscale** tool — put ESRGAN models (e.g. `RealESRGAN_x4plus.pth`) in the profile's upscaler directory (`hires-upscalers-dir`).
 3. Enable **VAE tiling** for large decodes to avoid VRAM blowups.
 
 **Qwen-Image 2.1** notes: native presets up to 2048/side (e.g. 2752×1536 16:9, from Unsloth's table), dimensions divisible by 32. Recommended sd.cpp settings: **cfg 6, euler, 20 steps, flow shift automatic** — these are really read from the model's capabilities at runtime.
