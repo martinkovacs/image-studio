@@ -1,0 +1,41 @@
+{
+  "name": "image-studio",
+  "version": "0.1.0",
+  "description": "Image generation & editing studio (OpenRouter + stable-diffusion.cpp)",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.web.json",
+    "test": "vitest run",
+    "fetch-sdcpp": "node scripts/fetch-sdcpp.mjs",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "extract-zip": "^2.0.1",
+    "lucide-react": "^1.48.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.7"
+  },
+  "allowScripts": {
+    "electron@44.4.5": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
+  },
+  "productName": "Image Studio"
+}

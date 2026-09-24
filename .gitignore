@@ -1,0 +1,9 @@
+node_modules/
+out/
+dist/
+release/
+resources/sdcpp/
+.env
+.env.*
+*.log
+.DS_Store
