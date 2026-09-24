@@ -10,12 +10,13 @@ import {
   sniffImageFormat,
   type SdServerLike,
 } from './generate'
-import { generateImages } from './openrouter'
+import { generateImages, sanitizeExtraParams } from './openrouter'
 import { HistoryStore } from './history'
 import type {
   AppSettings,
   GenerationProgress,
   HistoryItem,
+  OrImageParams,
   SdImgGenBody,
   ServerStatus,
 } from '../shared/types'
@@ -256,6 +257,93 @@ describe('generate (openrouter)', () => {
       jobId: 'j',
       error: 'OpenRouter API key not set — add it in Settings',
     })
+  })
+
+  it('validates extra in main, merges it after params and stores it in history params', async () => {
+    const png = pngBytes(8, 8)
+    const bodies: Record<string, unknown>[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)))
+        return okResponse({ data: [{ b64_json: png.toString('base64'), media_type: 'image/png' }] })
+      }),
+    )
+    const { createGenerator } = await import('./generate')
+    const g = createGenerator({
+      getSettings: () => settingsWith(dir),
+      getApiKey: () => 'sk-test',
+      server: new FakeServer(),
+      resolveServerPath: async () => null,
+      history,
+      emitProgress: () => undefined,
+    })
+    // The renderer "lies" by including protected keys; main must drop them.
+    const result = await g.run('jobE', {
+      provider: 'openrouter',
+      prompt: 'a cat',
+      inputs: { refImages: [] },
+      openrouter: {
+        model: 'm',
+        params: { n: 1 },
+        extra: { n: 2, tone: 'warm', model: 'other', prompt: 'other', input_references: [] },
+      },
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // extra merged after the normalized params (overrides n), protected keys stay app-controlled
+    expect(bodies[0]).toMatchObject({ model: 'm', prompt: 'a cat', n: 2, tone: 'warm' })
+    expect(bodies[0]).not.toHaveProperty('input_references')
+    // sanitized extra recorded in the history item for reuse-settings
+    const params = result.item.params as { model: string; params: OrImageParams; extra?: Record<string, unknown> }
+    expect(params.extra).toEqual({ n: 2, tone: 'warm' })
+  })
+
+  it('rejects a non-object extra with a clear error and sends no request', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { createGenerator } = await import('./generate')
+    const g = createGenerator({
+      getSettings: () => settingsWith(dir),
+      getApiKey: () => 'sk-test',
+      server: new FakeServer(),
+      resolveServerPath: async () => null,
+      history,
+      emitProgress: () => undefined,
+    })
+    const result = await g.run('jobBad', {
+      provider: 'openrouter',
+      prompt: 'p',
+      inputs: { refImages: [] },
+      // Simulates a tampered request: the typed state can only hold strings.
+      openrouter: { model: 'm', params: {}, extra: [1, 2] as unknown as Record<string, unknown> },
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toBe('Custom parameters must be a JSON object')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects an oversized extra with a clear error and sends no request', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { createGenerator } = await import('./generate')
+    const g = createGenerator({
+      getSettings: () => settingsWith(dir),
+      getApiKey: () => 'sk-test',
+      server: new FakeServer(),
+      resolveServerPath: async () => null,
+      history,
+      emitProgress: () => undefined,
+    })
+    const result = await g.run('jobBig', {
+      provider: 'openrouter',
+      prompt: 'p',
+      inputs: { refImages: [] },
+      openrouter: { model: 'm', params: {}, extra: { pad: 'x'.repeat(64 * 1024 + 1) } },
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toMatch(/too large/)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
@@ -638,10 +726,70 @@ describe('extFromMediaType', () => {
 })
 
 // ---------------------------------------------------------------------------
+// OpenRouter: extra request-body parameters (custom user JSON)
+
+describe('openrouter extra params', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const baseArgs = {
+    apiKey: 'sk-test',
+    model: 'm',
+    prompt: 'app prompt',
+    params: { n: 1 } as OrImageParams,
+    refImages: [] as string[],
+  }
+
+  it('merges extra after the normalized params so it overrides them', async () => {
+    let body: Record<string, unknown> | undefined
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        body = JSON.parse(String(init?.body))
+        return okResponse({ data: [{ b64_json: pngBytes(4, 4).toString('base64'), media_type: 'image/png' }] })
+      }),
+    )
+    await generateImages({
+      ...baseArgs,
+      params: { n: 1, quality: 'high' },
+      extra: { n: 3, quality: 'low', custom: { a: 1 } },
+    })
+    expect(body).toMatchObject({ model: 'm', prompt: 'app prompt', n: 3, quality: 'low', custom: { a: 1 } })
+  })
+
+  it('keeps model/prompt/input_references app-controlled even when extra tries to override', async () => {
+    let body: Record<string, unknown> | undefined
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        body = JSON.parse(String(init?.body))
+        return okResponse({ data: [{ b64_json: pngBytes(4, 4).toString('base64'), media_type: 'image/png' }] })
+      }),
+    )
+    await generateImages({ ...baseArgs, extra: { model: 'evil', prompt: 'evil', input_references: [], seed: 7 } })
+    expect(body).toMatchObject({ model: 'm', prompt: 'app prompt', seed: 7 })
+    expect(body).not.toHaveProperty('input_references')
+  })
+
+  it('rejects non-object extra with a clear error', () => {
+    expect(() => sanitizeExtraParams('nope')).toThrow('Custom parameters must be a JSON object')
+    expect(() => sanitizeExtraParams([1, 2])).toThrow('Custom parameters must be a JSON object')
+    expect(() => sanitizeExtraParams(null)).toThrow('Custom parameters must be a JSON object')
+  })
+
+  it('rejects oversized extra with a clear error', () => {
+    expect(() => sanitizeExtraParams({ pad: 'x'.repeat(64 * 1024 + 1) })).toThrow(/too large/)
+  })
+
+  it('drops protected keys and keeps everything else', () => {
+    expect(sanitizeExtraParams({ model: 'x', prompt: 'x', input_references: [], keep: 1 })).toEqual({ keep: 1 })
+    expect(sanitizeExtraParams(undefined)).toEqual({})
+  })
+})
+
+// ---------------------------------------------------------------------------
 // OpenRouter: HTTP 200 bodies that carry an error or no images
 
-describe('generateImages: 200-with-error and empty 200', () => {
-  afterEach(() => vi.unstubAllGlobals())
+describe('generateImages: 200-with-error and empty 200', () => {  afterEach(() => vi.unstubAllGlobals())
 
   const args = { apiKey: 'sk-test', model: 'm', prompt: 'p', params: {}, refImages: [] }
 

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, FolderOpen, Maximize2, MessageSquarePlus, Paperclip, Pencil, Ruler, Trash2, X } from 'lucide-react'
+import { ArrowUp, Braces, FolderOpen, Maximize2, MessageSquarePlus, Paperclip, Pencil, Ruler, Trash2, X } from 'lucide-react'
 import { imgUrl, type ChatThread, type HistoryItem } from '@shared/types'
 import { useStore } from '../store'
 import { Chip, cx, IconButton } from '../components/ui'
 import { fileToDataUrl, formatCost, formatDuration, imagesFromTransfer } from '../lib/util'
 import { LocalModelSelect, OpenRouterModelSelect, ProviderSwitch, ServerDot } from '../studio/ModelPicker'
 import { LocalResolution, OpenRouterResolution } from '../studio/ResolutionPicker'
+import { ExtraJson } from '../studio/ExtraJson'
 import { JobProgress } from '../studio/Canvas'
 
 const EXAMPLES = [
@@ -49,6 +50,32 @@ function SizePopover() {
       {open && (
         <div className="rise absolute right-0 top-full z-40 mt-2 w-80 rounded-lg border border-ink-700 bg-ink-900 p-4 shadow-2xl">
           {provider === 'local' ? <LocalResolution /> : <OpenRouterResolution model={model} />}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Custom OpenRouter JSON parameters, opened from the composer header. */
+function ExtraJsonPopover() {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const hasJson = useStore((s) => !!s.orExtraJson.trim())
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false)
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+  return (
+    <div ref={ref} className="relative">
+      <IconButton title="Custom parameters (JSON)" active={open || hasJson} onClick={() => setOpen(!open)}>
+        <Braces size={15} />
+      </IconButton>
+      {open && (
+        <div className="rise absolute right-0 top-full z-40 mt-2 w-96 rounded-lg border border-ink-700 bg-ink-900 p-4 shadow-2xl">
+          <span className="label-caps mb-2 block">Custom parameters (JSON)</span>
+          <ExtraJson />
         </div>
       )}
     </div>
@@ -298,6 +325,7 @@ export function ChatView() {
           <div className="w-72">{provider === 'local' ? <LocalModelSelect compact /> : <OpenRouterModelSelect />}</div>
           {provider === 'local' && <ServerDot />}
           <SizePopover />
+          {provider === 'openrouter' && <ExtraJsonPopover />}
         </header>
 
         <div

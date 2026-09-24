@@ -220,7 +220,12 @@ export interface GenerationRequest {
   negativePrompt?: string
   inputs: GenerationInputs
   /** For provider 'openrouter'. */
-  openrouter?: { model: string; params: OrImageParams }
+  openrouter?: {
+    model: string
+    params: OrImageParams
+    /** Extra request-body keys merged after params; model/prompt/input_references cannot be overridden. */
+    extra?: Record<string, unknown>
+  }
   /** For provider 'local'. prompt/negative/images are filled from the top-level fields. */
   local?: SdImgGenBody
   /** Optional chat thread this generation belongs to. */

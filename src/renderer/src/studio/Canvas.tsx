@@ -244,11 +244,12 @@ export function reuseSettings(item: HistoryItem) {
   s.set('prompt', item.prompt)
   s.set('negativePrompt', item.negativePrompt ?? '')
   if (item.provider === 'openrouter') {
-    // Stored as { model, params }.
-    const p = item.params as { model: string; params: OrImageParams }
+    // Stored as { model, params, extra? }.
+    const p = item.params as { model: string; params: OrImageParams; extra?: Record<string, unknown> }
     s.setOrModel(p.model)
     useStore.setState({ orParams: { ...p.params } })
     localStorage.setItem('orParams', JSON.stringify(p.params))
+    s.setOrExtraJson(p.extra ? JSON.stringify(p.extra, null, 2) : '')
   } else {
     // Stored as the sd.cpp body that was sent (images replaced by file paths).
     const { prompt: _p, negative_prompt: _n, ref_images: _r, init_image: _i, mask_image: _m, ...rest } = item.params as SdImgGenBody

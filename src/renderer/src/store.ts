@@ -43,6 +43,8 @@ interface State {
   orModelsError: string | null
   orModel: string
   orParams: OrImageParams
+  /** Custom OpenRouter request-body JSON for the selected model, as typed by the user. */
+  orExtraJson: string
 
   serverStatus: ServerStatus
   caps: SdCapabilities | null
@@ -65,6 +67,7 @@ interface Actions {
   set<K extends keyof State>(key: K, value: State[K]): void
   setOrParam<K extends keyof OrImageParams>(key: K, value: OrImageParams[K]): void
   setOrModel(id: string): void
+  setOrExtraJson(text: string): void
   patchLocal(patch: SdImgGenBody): void
   resetLocalToDefaults(): void
   loadOrModels(force?: boolean): Promise<void>
@@ -82,6 +85,11 @@ interface Actions {
 export type Store = State & Actions
 
 const localKey = (stem: string) => `localParams:${stem}`
+
+/** Custom OpenRouter JSON params are stored per model id: { [modelId]: jsonText }. */
+const orExtraKey = 'orExtraJson'
+
+const loadOrExtraMap = (): Record<string, string> => readJson<Record<string, string>>(orExtraKey)
 
 /** Parse a localStorage JSON object; a corrupted value must never white-screen the app. */
 function readJson<T extends object>(key: string): T {
@@ -130,6 +138,7 @@ export const useStore = create<Store>((set, get) => ({
   orModelsError: null,
   orModel: '',
   orParams: readJson<OrImageParams>('orParams'),
+  orExtraJson: '',
   serverStatus: { state: 'stopped', profileId: null, port: null },
   caps: null,
   localParams: {},
@@ -145,7 +154,8 @@ export const useStore = create<Store>((set, get) => ({
     if (initialized) return
     initialized = true
     const settings = await window.api.settings.get()
-    set({ settings, orModel: localStorage.getItem('orModel') || settings.openrouter.defaultModel })
+    const orModel = localStorage.getItem('orModel') || settings.openrouter.defaultModel
+    set({ settings, orModel, orExtraJson: loadOrExtraMap()[orModel] ?? '' })
     window.api.gen.onProgress((p) => {
       const job = get().jobs[p.jobId]
       if (job) set({ jobs: { ...get().jobs, [p.jobId]: { ...job, progress: p } } })
@@ -198,7 +208,17 @@ export const useStore = create<Store>((set, get) => ({
       }
     }
     localStorage.setItem('orParams', JSON.stringify(orParams))
-    set({ orModel: id, orParams })
+    set({ orModel: id, orParams, orExtraJson: loadOrExtraMap()[id] ?? '' })
+  },
+
+  setOrExtraJson(text) {
+    // One entry per model id, so switching models restores that model's JSON.
+    const map = loadOrExtraMap()
+    const id = get().orModel
+    if (text.trim()) map[id] = text
+    else delete map[id]
+    localStorage.setItem(orExtraKey, JSON.stringify(map))
+    set({ orExtraJson: text })
   },
 
   patchLocal(patch) {
@@ -269,7 +289,26 @@ export const useStore = create<Store>((set, get) => ({
         // Chat auto-attaches the previous result; silently trim to what the model accepts.
         req.inputs.refImages = req.inputs.refImages.slice(0, maxRefs)
       }
-      req.openrouter = { model: s.orModel, params: s.orParams }
+      // Custom JSON is re-validated in main; this parse only gives an early, local error.
+      let extra: Record<string, unknown> | undefined
+      const extraText = s.orExtraJson.trim()
+      if (extraText) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(extraText)
+        } catch {
+          s.showError('Custom parameters must be a JSON object')
+          return null
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          s.showError('Custom parameters must be a JSON object')
+          return null
+        }
+        extra = parsed as Record<string, unknown>
+      }
+      req.openrouter = extra
+        ? { model: s.orModel, params: s.orParams, extra }
+        : { model: s.orModel, params: s.orParams }
     } else {
       const profile = s.settings?.local.profiles.find((p) => p.id === s.settings?.local.activeProfileId)
       if (!profile) {

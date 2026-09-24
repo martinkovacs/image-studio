@@ -6,6 +6,7 @@ import { imagesFromTransfer } from '../lib/util'
 import { SLIM } from '../lib/edition'
 import { LocalModelSelect, OpenRouterModelSelect, ProviderSwitch } from './ModelPicker'
 import { LocalResolution, OpenRouterResolution } from './ResolutionPicker'
+import { ExtraJson } from './ExtraJson'
 import { HiresSection, LocalParams, LoraSection, OpenRouterParams, PerformanceSection, SkipLayerGuidance, VaeTilingSection } from './Params'
 import { InitImage, RefImages, StrengthField } from './Inputs'
 import { Canvas } from './Canvas'
@@ -62,6 +63,7 @@ export function StudioView() {
   const updateSettings = useStore((s) => s.updateSettings)
   const orModels = useStore((s) => s.orModels)
   const orModel = useStore((s) => s.orModel)
+  const orExtraJson = useStore((s) => s.orExtraJson)
   const refCount = useStore((s) => s.inputs.refImages.length)
   const hasInit = useStore((s) => !!s.inputs.initImage)
   const jobCount = useStore((s) => Object.keys(s.jobs).length)
@@ -163,6 +165,12 @@ export function StudioView() {
           <Section title="Size">{local ? <LocalResolution /> : <OpenRouterResolution model={model} />}</Section>
 
           <Section title="Parameters">{local ? <LocalParams advanced={advanced} /> : <OpenRouterParams model={model} />}</Section>
+
+          {!local && advanced && (
+            <Section title="Custom parameters (JSON)" defaultOpen={orExtraJson.trim().length > 0}>
+              <ExtraJson />
+            </Section>
+          )}
 
           {local && advanced && (
             <>
