@@ -1,0 +1,11 @@
+[
+  { "id": "linux-vulkan", "label": "Linux (Vulkan)", "platform": "linux", "assetPattern": "-x86_64-vulkan\\.zip$" },
+  { "id": "linux-cpu", "label": "Linux (CPU)", "platform": "linux", "assetPattern": "bin-Linux-Ubuntu-[0-9.]+-x86_64\\.zip$" },
+  { "id": "linux-rocm", "label": "Linux (ROCm)", "platform": "linux", "assetPattern": "-x86_64-rocm-[0-9.]+\\.zip$" },
+  { "id": "linux-cuda-source", "label": "Linux (CUDA, built from source)", "platform": "linux", "assetPattern": null },
+  { "id": "win-cuda12", "label": "Windows (CUDA 12)", "platform": "win32", "assetPattern": "win-cuda12-x64\\.zip$" },
+  { "id": "win-vulkan", "label": "Windows (Vulkan)", "platform": "win32", "assetPattern": "win-vulkan-x64\\.zip$" },
+  { "id": "win-cpu", "label": "Windows (CPU)", "platform": "win32", "assetPattern": "win-cpu-x64\\.zip$" },
+  { "id": "win-rocm", "label": "Windows (ROCm)", "platform": "win32", "assetPattern": "win-rocm-[0-9.]+-x64\\.zip$" },
+  { "id": "mac-arm64", "label": "macOS (Apple Silicon)", "platform": "darwin", "assetPattern": "bin-Darwin-.*arm64\\.zip$" }
+]

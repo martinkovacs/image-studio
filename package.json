@@ -9,9 +9,13 @@
     "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.web.json",
     "test": "vitest run",
     "fetch-sdcpp": "node scripts/fetch-sdcpp.mjs",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder",
+    "build-sdcpp-cuda": "bash scripts/build-sdcpp-cuda.sh"
   },
   "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
     "extract-zip": "^2.0.1",
     "lucide-react": "^1.48.0",
     "react": "^19.3.0",

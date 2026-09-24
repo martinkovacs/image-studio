@@ -7,3 +7,4 @@ resources/sdcpp/
 .env.*
 *.log
 .DS_Store
+tsconfig.*.tsbuildinfo

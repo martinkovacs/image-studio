@@ -56,7 +56,7 @@ export interface ServerStatus {
 export interface EngineVariant {
   id: string // e.g. "linux-vulkan", "win-cuda12", "custom-build"
   label: string
-  platform: NodeJS.Platform
+  platform: string
   /** Release asset name pattern, null for source builds. */
   assetPattern: string | null
   installed: boolean

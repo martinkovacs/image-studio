@@ -1,0 +1,29 @@
+appId: com.imagestudio.app
+productName: Image Studio
+
+directories:
+  output: release
+
+files:
+  - out/**
+
+# Pre-fetched engine(s): <resources>/sdcpp/<variantId>/ end up next to the app
+# under resources/sdcpp/. asarUnpack is not needed for resources.
+extraResources:
+  - from: resources/sdcpp
+    to: sdcpp
+    filter:
+      - '**/*'
+
+linux:
+  targets:
+    - AppImage
+    - tar.gz
+
+win:
+  targets:
+    - nsis
+
+mac:
+  targets:
+    - dmg
