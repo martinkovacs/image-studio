@@ -41,6 +41,17 @@ Profile templates only pre-fill which **weight-file slots** matter for a model f
 
 **Qwen-Image 2.1** notes: native presets up to 2048/side (e.g. 2752×1536 16:9, from Unsloth's table), dimensions divisible by 32. Recommended sd.cpp settings: **cfg 6, euler, 20 steps, flow shift automatic** — these are really read from the model's capabilities at runtime.
 
+## Editions
+
+Builds come in two editions, selected at build time via `IMAGE_STUDIO_EDITION=slim` (the `__SLIM__` constant is baked in by `electron-vite`):
+
+| Edition | Product name | Local sd.cpp engine | Cloud (OpenRouter) |
+| --- | --- | --- | --- |
+| **Full** (default) | Image Studio | bundled (`extraResources`) | yes |
+| **Slim** | Image Studio Lite | not bundled — in-app download only | yes |
+
+The slim edition ships a smaller package (~125 MB vs ~250+ MB) with the local-generation UI disabled; users there download engine variants from within the app instead.
+
 ## Getting started
 
 ```bash
@@ -79,15 +90,29 @@ Run without a GPU: `linux-cpu` variant. Heavy models (Flux, Qwen) typically want
 
 | Script | What it does |
 | --- | --- |
-| `npm run dev` | electron-vite dev server + Electron app |
+| `npm run dev` | electron-vite dev server + Electron app (drops `ELECTRON_RUN_AS_NODE` from the env) |
+| `npm run dev:slim` | dev server in slim/Lite mode (`IMAGE_STUDIO_EDITION=slim`) |
 | `npm run build` | electron-vite production build (`out/`) |
 | `npm run typecheck` | `tsc` for node and web tsconfig |
 | `npm test` | vitest |
-| `npm run fetch-sdcpp` | fetch sd.cpp release asset for a variant into `resources/sdcpp/` |
+| `npm run fetch-sdcpp` | fetch sd.cpp release asset for a variant into `resources/sdcpp/` (staged download, atomic swap; pass `GITHUB_TOKEN`/`GH_TOKEN` for authenticated GitHub API access) |
 | `npm run build-sdcpp-cuda` | build sd.cpp CUDA from source, install as engine variant (Linux) |
-| `npm run dist` | build + electron-builder (AppImage/zip, NSIS, DMG) |
+| `npm run dist:full` | build + package the full edition (`electron-builder.yml`) |
+| `npm run dist:slim` | build + package the slim/Lite edition (`electron-builder.slim.yml`) |
 
-Packaging via `electron-builder`: `resources/sdcpp` is bundled as `extraResources` next to the app. Outputs in `release/`.
+`dist:*` scripts are cross-platform wrappers (`scripts/dist.mjs`); pass extra electron-builder args straight through, e.g. `npm run dist:full -- --linux zip` or `node scripts/dist.mjs slim --win squirrel`. The full edition does **not** fetch the engine automatically — run `node scripts/fetch-sdcpp.mjs <variantId>` (e.g. `linux-vulkan`, `win-vulkan`) first. Outputs land in `release/` (gitignored).
+
+Packaging via `electron-builder`: `resources/sdcpp` is bundled as `extraResources` next to the app (full edition only; never inside the asar). Targets: Linux `zip`, Windows `squirrel` (Squirrel.Windows, needs `electron-builder-squirrel-windows`), macOS `dmg` (not built in CI).
+
+## CI / releases
+
+`.github/workflows/build.yml` runs on pushes/PRs to `main`, tags `v*`, and manual dispatch:
+
+1. **check** — typecheck + tests on ubuntu-latest (Node 24).
+2. **package** — matrix `OS × edition` (ubuntu→`--linux zip`, windows→`--win squirrel`); fetches the engine for the full edition and uploads `image-studio-<edition>-<os>` artifacts. Code signing is disabled (`CSC_IDENTITY_AUTO_DISCOVERY: false`).
+3. **release** — on tags `v*`: creates a GitHub release with all packaged artifacts (`gh release create --generate-notes`).
+
+npm's install-script approval (`allowScripts` in `package.json`) covers the postinstalls needed in CI (esbuild, electron-winstaller).
 
 ## Project layout
 
