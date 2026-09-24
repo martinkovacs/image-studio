@@ -1,0 +1,110 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+  package:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        edition: [full, slim]
+        include:
+          - os: ubuntu-latest
+            dist-args: --linux zip
+            fetch-variant: linux-vulkan
+            artifact-files: release/*.zip
+          - os: windows-latest
+            dist-args: --win squirrel
+            fetch-variant: win-vulkan
+            artifact-files: release/squirrel-windows/*
+    runs-on: ${{ matrix.os }}
+    env:
+      # No code signing (no certificate configured).
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # npm 12 blocks install scripts unless approved; approvals live in the
+      # "allowScripts" field of package.json (esbuild, electron-winstaller).
+      # npm < 12 ignores that field and simply runs all scripts.
+      - run: npm ci
+
+      - name: Fetch sd.cpp engine (${{ matrix.fetch-variant }})
+        if: matrix.edition == 'full'
+        run: node scripts/fetch-sdcpp.mjs ${{ matrix.fetch-variant }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Package (${{ matrix.edition }})
+        run: node scripts/dist.mjs ${{ matrix.edition }} ${{ matrix.dist-args }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-studio-${{ matrix.edition }}-${{ matrix.os }}
+          path: ${{ matrix.artifact-files }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # download-artifact puts every artifact into its own subdirectory.
+        # Asset names are flattened by gh, so if two editions produce the same
+        # file name (e.g. Squirrel's RELEASES), prefix the later ones with the
+        # artifact (edition-os) name to avoid an upload failure.
+        run: |
+          mkdir -p upload
+          for f in artifacts/*/*; do
+            base="$(basename "$f")"
+            if [ -e "upload/$base" ]; then
+              base="$(basename "$(dirname "$f")")-$base"
+            fi
+            cp "$f" "upload/$base"
+          done
+          ls -la upload
+          gh release create "$GITHUB_REF_NAME" --generate-notes upload/*
