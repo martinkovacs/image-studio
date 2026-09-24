@@ -6,7 +6,7 @@
 //
 // Set GITHUB_TOKEN (or GH_TOKEN) to authenticate GitHub API requests — CI
 // needs this to avoid unauthenticated rate limits.
-import { createWriteStream, lstatSync, readdirSync } from 'node:fs'
+import { createWriteStream, existsSync, lstatSync, readdirSync } from 'node:fs'
 import fsP from 'node:fs/promises'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -39,6 +39,14 @@ function serverBinaryName(platform) {
 async function main() {
   const platform = process.platform
   const variantId = process.argv[2] ?? defaultVariant(platform)
+  // Remove leftover staging dirs from earlier interrupted runs (e.g. killed
+  // CI jobs) before doing anything else, so OUT_ROOT never accumulates junk.
+  if (existsSync(OUT_ROOT) && readdirSync(OUT_ROOT).some((n) => n.startsWith('.'))) {
+    for (const name of readdirSync(OUT_ROOT)) {
+      if (name.startsWith('.')) await fsP.rm(path.join(OUT_ROOT, name), { recursive: true, force: true })
+    }
+    console.log('Removed leftover staging dirs in resources/sdcpp.')
+  }
   const defs = variantsJson.filter((v) => v.platform === platform)
   const def = defs.find((v) => v.id === variantId)
   if (!def) {

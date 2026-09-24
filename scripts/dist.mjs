@@ -13,6 +13,7 @@
 // extraResources.
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -31,10 +32,26 @@ else delete process.env.IMAGE_STUDIO_EDITION
 // No code signing anywhere (also set only here, not needed at test time).
 process.env.CSC_IDENTITY_AUTO_DISCOVERY = 'false'
 
-/** Runs a local node_modules/.bin binary; undefined env values are dropped. */
-function run(cmd, args) {
-  const bin = path.join(projectRoot, 'node_modules', '.bin', process.platform === 'win32' ? `${cmd}.cmd` : cmd)
-  const res = spawnSync(bin, args, { stdio: 'inherit', env: cleanEnv(process.env), shell: false })
+/**
+ * Resolves a local tool's JS entry point via its package.json `bin` field and
+ * runs it with node directly (shell: false). Spawning the .bin/.cmd shim broke
+ * on Windows after Node's CVE-2024-27980 fix (EINVAL when spawning .cmd
+ * without a shell), and spawning with a shell breaks arg escaping/politics.
+ * Same approach as scripts/dev.mjs.
+ */
+function run(pkgName, binName, args) {
+  const pkgPath = createRequire(path.join(projectRoot, 'package.json')).resolve(`${pkgName}/package.json`)
+  const bin = JSON.parse(readFileSync(pkgPath, 'utf8')).bin?.[binName] ?? null
+  if (typeof bin !== 'string') {
+    console.error(`No "${binName}" bin entry found in ${pkgPath}`)
+    process.exit(1)
+  }
+  const binJs = path.join(path.dirname(pkgPath), bin)
+  if (!existsSync(binJs)) {
+    console.error(`Bin entry not found: ${binJs}`)
+    process.exit(1)
+  }
+  const res = spawnSync(process.execPath, [binJs, ...args], { stdio: 'inherit', env: cleanEnv(process.env), shell: false })
   if (res.status !== 0 || res.error) process.exit(res.status ?? 1)
 }
 
@@ -46,6 +63,6 @@ function cleanEnv(env) {
   return out
 }
 
-run('electron-vite', ['build'])
+run('electron-vite', 'electron-vite', ['build'])
 // electron-builder must never see ELECTRON_RUN_AS_NODE (already stripped above).
-run('electron-builder', ['--config', edition === 'slim' ? 'electron-builder.slim.yml' : 'electron-builder.yml', '--publish', 'never', ...builderArgs])
+run('electron-builder', 'electron-builder', ['--config', edition === 'slim' ? 'electron-builder.slim.yml' : 'electron-builder.yml', '--publish', 'never', ...builderArgs])

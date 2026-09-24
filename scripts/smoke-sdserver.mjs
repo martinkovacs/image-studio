@@ -23,12 +23,14 @@ const env = {
   ...process.env,
   LD_LIBRARY_PATH: [dir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':')
 }
-const flags = []
+// Bind sd-server to the smoke port explicitly: without a --listen-ip/--listen-port
+// it may default to another address/interface, so polling 127.0.0.1:<port> below
+// would never connect (or hit something else).
+const flags = ['--listen-ip', '127.0.0.1', '--listen-port', String(port)]
 if (model) {
   flags.unshift('--model', model)
 } else {
   // Without a model sd-server refuses to start; --help still proves it runs.
-  flags.splice(0, flags.length)
   flags.push('--help')
 }
 console.log(`spawning ${bin} ${flags.map((f) => (f.includes(' ') ? `"${f}"` : f)).join(' ')}`)

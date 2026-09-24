@@ -104,6 +104,8 @@ Run without a GPU: `linux-cpu` variant. Heavy models (Flux, Qwen) typically want
 
 Packaging via `electron-builder`: `resources/sdcpp` is bundled as `extraResources` next to the app (full edition only; never inside the asar). Targets: Linux `zip`, Windows `squirrel` (Squirrel.Windows, needs `electron-builder-squirrel-windows`), macOS `dmg` (not built in CI).
 
+Windows icon: `scripts/make-icon.mjs` generates both `build/icon.png` (512×512, other platform icons) and `build/icon.ico` (256×256, single PNG-compressed entry). The `.ico` is used for the Windows exe (`win.icon`) and as the Squirrel installer icon (`squirrelWindows.iconUrl`).
+
 ## CI / releases
 
 `.github/workflows/build.yml` runs on pushes/PRs to `main`, tags `v*`, and manual dispatch:
