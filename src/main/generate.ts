@@ -33,7 +33,9 @@ export interface SdServerLike {
     output_format?: string
   }): Promise<{ image: Buffer; format: string; width: number; height: number; upscaler: string }>
   on(event: 'progress', cb: (p: { step: number; total: number; speed?: string }) => void): void
+  on(event: 'stage', cb: (stage: 'decoding' | 'hires' | 'sampling') => void): void
   off(event: 'progress', cb: (p: { step: number; total: number; speed?: string }) => void): void
+  off(event: 'stage', cb: (stage: 'decoding' | 'hires' | 'sampling') => void): void
 }
 
 export interface GeneratorDeps {
@@ -217,17 +219,24 @@ export function createGenerator(deps: GeneratorDeps): Generator {
       ...(req.inputs.initImage ? [req.inputs.initImage] : []),
       ...(req.inputs.maskImage ? [req.inputs.maskImage] : []),
     ]
+    let phase: string | undefined
     const onProgress = (p: { step: number; total: number; speed?: string }): void => {
-      // Forward as-is; a restarting step count (e.g. hires second pass) is fine.
-      emit(jobId, { stage: 'sampling', step: p.step, totalSteps: p.total, speed: p.speed })
+      // A restarting step count (e.g. hires second pass) is fine; phase labels it.
+      emit(jobId, { stage: 'sampling', step: p.step, totalSteps: p.total, speed: p.speed, message: phase })
+    }
+    const onStage = (stage: 'decoding' | 'hires' | 'sampling'): void => {
+      if (stage === 'hires') phase = 'hires pass'
+      emit(jobId, stage === 'decoding' ? { stage: 'decoding' } : { stage: 'sampling', message: phase })
     }
     deps.server.on('progress', onProgress)
+    deps.server.on('stage', onStage)
     let result: { format: string; images: Buffer[] }
     try {
       emit(jobId, { stage: 'waiting' })
       result = await deps.server.imgGen(body, { signal: ac.signal })
     } finally {
       deps.server.off('progress', onProgress)
+      deps.server.off('stage', onStage)
     }
 
     const mediaType = mimeFromFormat(result.format)

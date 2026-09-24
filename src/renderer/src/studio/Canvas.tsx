@@ -45,7 +45,7 @@ export function JobProgress({ job, compact }: { job: Job; compact?: boolean }) {
     <div className={cx('flex flex-col gap-1.5', compact ? 'w-full' : 'w-72')}>
       <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
         <span className="truncate text-ink-200">
-          <span className="text-safelight">●</span> {stageLabel[stage] ?? stage}
+          <span className="text-safelight">●</span> {stage === 'sampling' && p?.message ? p.message : (stageLabel[stage] ?? stage)}
           {p?.step != null && p.totalSteps ? ` ${p.step}/${p.totalSteps}` : ''}
         </span>
         <span className="text-ink-500">{formatDuration(Date.now() - job.startedAt)}</span>

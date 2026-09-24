@@ -133,7 +133,7 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
       <div className="grid grid-cols-2 gap-2">
         <Field label="Sampler">
           <Select
-            value={sp.sample_method ?? ''}
+            value={sp.sample_method && sp.sample_method !== 'default' ? sp.sample_method : ''}
             placeholder="model default"
             onChange={(v) => setSp({ sample_method: v || undefined })}
             options={samplerOptions}
@@ -141,7 +141,7 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
         </Field>
         <Field label="Scheduler">
           <Select
-            value={sp.scheduler ?? ''}
+            value={sp.scheduler && sp.scheduler !== 'default' ? sp.scheduler : ''}
             placeholder="model default"
             onChange={(v) => setSp({ scheduler: v || undefined })}
             options={schedulerOptions}

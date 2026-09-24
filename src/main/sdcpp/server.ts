@@ -183,6 +183,14 @@ export function listDevices(serverPath: string): Promise<string[]> {
   return SdServer.listDevices(serverPath)
 }
 
+/** Maps sd.cpp log lines to coarse pipeline stages shown in the UI. */
+export function parseStageLine(line: string): 'decoding' | 'hires' | 'sampling' | null {
+  if (/decoding \d+ latents|tiled vae|vae_tiling/i.test(line)) return 'decoding'
+  if (/hires fix: upscaling/i.test(line)) return 'hires'
+  if (/generating image: \d+\/\d+/i.test(line)) return 'sampling'
+  return null
+}
+
 export class SdServer extends EventEmitter {
   private child: ChildProcess | null = null
   private statusValue: ServerStatus = { state: 'stopped', profileId: null, port: null }
@@ -236,6 +244,10 @@ export class SdServer extends EventEmitter {
       if (this.logBuffer.length > 2000) this.logBuffer.splice(0, this.logBuffer.length - 2000)
       const prog = parseProgressLine(line)
       if (prog) this.emit('progress', prog)
+      else {
+        const stage = parseStageLine(line)
+        if (stage) this.emit('stage', stage)
+      }
       this.emit('log', line)
     }
   }

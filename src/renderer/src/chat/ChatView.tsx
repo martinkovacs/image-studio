@@ -197,6 +197,8 @@ export function ChatView() {
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<string[]>([])
   const [continueEditing, setContinueEditing] = useState(true)
+  // Local models without reference-image support iterate via img2img instead.
+  const [asInit, setAsInit] = useState(localStorage.getItem('chat:asInit') === '1')
   const [dragOver, setDragOver] = useState(false)
   const scroller = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -258,7 +260,9 @@ export function ChatView() {
     }
     setText('')
     setAttachments([])
-    const res = await generate({ threadId, prompt, inputs: { refImages } })
+    const useInit = provider === 'local' && asInit && refImages.length > 0
+    const inputs = useInit ? { refImages: [], initImage: refImages[0] } : { refImages }
+    const res = await generate({ threadId, prompt, inputs })
     if (res?.ok) {
       if (useStore.getState().settings && threadId === localStorage.getItem(ACTIVE_KEY)) setItems((prev) => [...prev, res.item])
     } else if (res && !res.cancelled) {
@@ -420,6 +424,18 @@ export function ChatView() {
             <Chip active={continueEditing} onClick={() => setContinueEditing(!continueEditing)} title="Attach the previous result automatically">
               continue editing last image
             </Chip>
+            {provider === 'local' && (
+              <Chip
+                active={asInit}
+                onClick={() => {
+                  localStorage.setItem('chat:asInit', asInit ? '0' : '1')
+                  setAsInit(!asInit)
+                }}
+                title="Send the image as img2img init instead of a reference. Use for models without edit support (SD, SDXL, Flux.1-dev)."
+              >
+                img2img
+              </Chip>
+            )}
           </div>
         </div>
       </div>
