@@ -570,6 +570,8 @@ function mimeFromFormat(format: string): string {
       return 'image/gif'
     case 'svg':
       return 'image/svg+xml'
+    case 'bmp':
+      return 'image/bmp'
     default:
       return 'image/png'
   }

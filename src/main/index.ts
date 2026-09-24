@@ -23,11 +23,15 @@ function handleSquirrelEvent(): boolean {
   const updateExe = resolve(dirname(process.execPath), '..', 'Update.exe')
   const exe = basename(process.execPath)
   const runUpdate = (args: string[]): void => {
-    spawn(updateExe, args, { detached: true }).on('close', () => app.quit())
+    spawn(updateExe, args, { detached: true })
+      .on('close', () => app.quit())
+      .on('error', () => app.quit())
   }
   if (cmd === '--squirrel-install' || cmd === '--squirrel-updated') runUpdate(['--createShortcut', exe])
   else if (cmd === '--squirrel-uninstall') runUpdate(['--removeShortcut', exe])
-  else app.quit()
+  else if (cmd === '--squirrel-obsolete') app.quit()
+  // --squirrel-firstrun (and anything unknown) is a normal launch.
+  else return false
   return true
 }
 const squirrelEvent = handleSquirrelEvent()

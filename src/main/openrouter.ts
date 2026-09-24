@@ -93,8 +93,17 @@ const MAX_IMAGE_BYTES = 200 * 1024 * 1024
 
 /** Downloads a provider-hosted result. The URL is remote-controlled: https only, size-capped. */
 async function fetchImageFromUrl(url: string, signal?: AbortSignal): Promise<GeneratedImage> {
-  if (new URL(url).protocol !== 'https:') throw new Error('Refusing to download generated image over a non-https URL')
-  const res = await fetch(url, { signal: combineSignal(signal), redirect: 'error' })
+  // Follow redirects by hand so every hop (not just the first) must be https.
+  let res: Response | undefined
+  let current = url
+  for (let hop = 0; ; hop++) {
+    if (new URL(current).protocol !== 'https:') throw new Error('Refusing to download generated image over a non-https URL')
+    res = await fetch(current, { signal: combineSignal(signal), redirect: 'manual' })
+    const location = res.headers.get('location')
+    if (res.status < 300 || res.status >= 400 || !location) break
+    if (hop >= 3) throw new Error('Too many redirects while downloading generated image')
+    current = new URL(location, current).toString()
+  }
   if (!res.ok || !res.body) throw new Error(`Failed to download generated image (HTTP ${res.status})`)
   if (Number(res.headers.get('content-length') ?? 0) > MAX_IMAGE_BYTES) throw new Error('Generated image is too large')
   const chunks: Uint8Array[] = []
