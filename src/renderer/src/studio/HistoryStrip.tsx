@@ -4,6 +4,7 @@ import { imgUrl, type HistoryItem } from '@shared/types'
 import { useStore } from '../store'
 import { Button, cx, Empty, Segmented } from '../components/ui'
 import { timeAgo } from '../lib/util'
+import { SLIM } from '../lib/edition'
 
 type Filter = 'all' | 'openrouter' | 'local'
 
@@ -86,6 +87,7 @@ export function HistoryStrip() {
           <span className="font-display text-[13px] font-semibold text-ink-200">History</span>
           <span className="font-mono text-[10px] text-ink-500">{history.length}</span>
         </div>
+        {!SLIM && (
         <Segmented<Filter>
           size="sm"
           value={filter}
@@ -96,6 +98,7 @@ export function HistoryStrip() {
             { value: 'local', label: 'Local' }
           ]}
         />
+        )}
       </div>
       <div className="flex-1 overflow-y-auto px-2.5 py-2">
         {running.length > 0 && (

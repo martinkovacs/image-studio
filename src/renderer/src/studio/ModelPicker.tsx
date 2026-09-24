@@ -3,10 +3,12 @@ import { Cloud, Cpu, Loader2, Play, RefreshCw, Square } from 'lucide-react'
 import type { ProviderId } from '@shared/types'
 import { activeProfile, useStore } from '../store'
 import { Button, Combobox, cx, Segmented, Select } from '../components/ui'
+import { SLIM } from '../lib/edition'
 
 export function ProviderSwitch({ size = 'md' }: { size?: 'sm' | 'md' }) {
   const provider = useStore((s) => s.provider)
   const set = useStore((s) => s.set)
+  if (SLIM) return null
   return (
     <Segmented<ProviderId>
       size={size}

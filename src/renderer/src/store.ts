@@ -14,6 +14,7 @@ import type {
   ServerStatus
 } from '@shared/types'
 import { uid } from './lib/util'
+import { SLIM } from './lib/edition'
 
 export interface Job {
   id: string
@@ -115,7 +116,7 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined
 export const useStore = create<Store>((set, get) => ({
   settings: null,
   view: 'main',
-  provider: (localStorage.getItem('provider') as ProviderId) || 'openrouter',
+  provider: SLIM ? 'openrouter' : (localStorage.getItem('provider') as ProviderId) || 'openrouter',
   prompt: '',
   negativePrompt: '',
   orModels: [],
@@ -145,11 +146,12 @@ export const useStore = create<Store>((set, get) => ({
       if (s.state === 'stopped' || s.state === 'error') set({ caps: null })
       if (s.state === 'error' && s.error) get().showError(s.error.split('\n')[0])
     })
+    void get().loadOrModels()
+    void get().refreshHistory()
+    if (SLIM) return
     const status = await window.api.local.status()
     set({ serverStatus: status })
     if (status.state === 'ready') void get().refreshCaps()
-    void get().loadOrModels()
-    void get().refreshHistory()
   },
 
   async updateSettings(patch) {

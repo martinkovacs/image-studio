@@ -288,6 +288,9 @@ export interface StudioApi {
     get(): Promise<AppSettings>
     update(patch: DeepPartial<AppSettings>): Promise<AppSettings>
     setOpenRouterKey(key: string | null): Promise<void>
+    /** Main-process dialogs; these paths cannot be set via update(). Resolve null when cancelled. */
+    chooseOutputDir(): Promise<AppSettings | null>
+    chooseServerBinary(): Promise<AppSettings | null>
     pickPath(opts: { kind: 'file' | 'directory'; title?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null>
   }
   openrouter: {

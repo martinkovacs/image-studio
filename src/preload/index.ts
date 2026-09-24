@@ -14,6 +14,8 @@ const api: StudioApi = {
     get: () => invoke('settings:get'),
     update: (patch) => invoke('settings:update', patch),
     setOpenRouterKey: (key) => invoke('settings:setOpenRouterKey', key),
+    chooseOutputDir: () => invoke('settings:chooseOutputDir'),
+    chooseServerBinary: () => invoke('settings:chooseServerBinary'),
     pickPath: (opts) => invoke('settings:pickPath', opts)
   },
   openrouter: {

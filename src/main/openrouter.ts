@@ -89,11 +89,23 @@ function combineSignal(signal?: AbortSignal): AbortSignal {
     : AbortSignal.timeout(REQUEST_TIMEOUT_MS)
 }
 
+const MAX_IMAGE_BYTES = 200 * 1024 * 1024
+
+/** Downloads a provider-hosted result. The URL is remote-controlled: https only, size-capped. */
 async function fetchImageFromUrl(url: string, signal?: AbortSignal): Promise<GeneratedImage> {
-  const res = await fetch(url, { signal: combineSignal(signal) })
-  if (!res.ok) throw new Error(`Failed to download generated image (HTTP ${res.status})`)
+  if (new URL(url).protocol !== 'https:') throw new Error('Refusing to download generated image over a non-https URL')
+  const res = await fetch(url, { signal: combineSignal(signal), redirect: 'error' })
+  if (!res.ok || !res.body) throw new Error(`Failed to download generated image (HTTP ${res.status})`)
+  if (Number(res.headers.get('content-length') ?? 0) > MAX_IMAGE_BYTES) throw new Error('Generated image is too large')
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for await (const chunk of res.body) {
+    size += chunk.byteLength
+    if (size > MAX_IMAGE_BYTES) throw new Error('Generated image is too large')
+    chunks.push(chunk)
+  }
   const mediaType = res.headers.get('content-type')?.split(';')[0] ?? 'image/png'
-  return { data: Buffer.from(await res.arrayBuffer()), mediaType }
+  return { data: Buffer.concat(chunks), mediaType }
 }
 
 export async function generateImages(

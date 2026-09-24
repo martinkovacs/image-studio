@@ -39,6 +39,61 @@ function merge<T>(base: T, patch: unknown): T {
   return out as T
 }
 
+// ---------------------------------------------------------------------------
+// Renderer patches are untrusted: keep only known keys with the right types.
+// outputDir and customServerPath are deliberately absent — they widen file
+// access / choose an executable, so only main-process dialogs may set them.
+
+type Check = (v: unknown) => boolean
+const isStr: Check = (v) => typeof v === 'string' && v.length < 4096
+const oneOf = (...xs: string[]): Check => (v) => typeof v === 'string' && xs.includes(v)
+const isPort: Check = (v) => Number.isInteger(v) && (v as number) >= 1024 && (v as number) <= 65535
+const isArg: Check = (v) => typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v)) || isStr(v)
+
+function isProfile(v: unknown): boolean {
+  if (!isPlainObject(v)) return false
+  const { id, name, args, extraArgs } = v
+  return (
+    isStr(id) &&
+    isStr(name) &&
+    isStr(extraArgs) &&
+    isPlainObject(args) &&
+    Object.entries(args).every(([k, a]) => /^[a-z][a-z0-9_-]*$/.test(k) && isArg(a))
+  )
+}
+
+const SCHEMA: Record<string, Check | Record<string, Check>> = {
+  uiMode: oneOf('studio', 'chat'),
+  studioDetail: oneOf('simple', 'advanced'),
+  theme: oneOf('dark', 'light', 'system'),
+  openrouter: { defaultModel: isStr },
+  local: {
+    engineVariant: isStr,
+    activeProfileId: (v) => v === null || isStr(v),
+    listenPort: isPort,
+    profiles: (v) => Array.isArray(v) && v.length < 500 && v.every(isProfile)
+  }
+}
+
+export function sanitizePatch(patch: unknown): DeepPartial<AppSettings> {
+  const walk = (p: unknown, schema: Record<string, Check | Record<string, Check>>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {}
+    if (!isPlainObject(p)) return out
+    for (const [k, rule] of Object.entries(schema)) {
+      if (!(k in p)) continue
+      const v = p[k]
+      if (typeof rule === 'function') {
+        if (rule(v)) out[k] = v
+        else throw new Error(`Invalid setting: ${k}`)
+      } else {
+        out[k] = walk(v, rule as Record<string, Check>)
+      }
+    }
+    return out
+  }
+  return walk(patch, SCHEMA) as DeepPartial<AppSettings>
+}
+
 let cache: AppSettings | null = null
 let writeQueue: Promise<void> = Promise.resolve()
 
@@ -68,12 +123,13 @@ function persist(settings: AppSettings): Promise<void> {
 }
 
 export async function updateSettings(patch: DeepPartial<AppSettings>): Promise<AppSettings> {
+  // Merge synchronously against the latest cache so concurrent updates compose.
   const next = merge(getSettings(), patch)
   // Derived from the key file; never writable from the renderer.
   next.openrouter.hasApiKey = existsSync(keyPath())
   cache = next
   await persist(next)
-  return next
+  return getSettings()
 }
 
 // The OpenRouter key is encrypted with the OS keychain (safeStorage) and never

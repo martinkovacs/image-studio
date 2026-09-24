@@ -18,6 +18,7 @@ import { imgUrl, type HistoryItem, type OrImageParams, type SdImgGenBody } from 
 import { useStore, type Job } from '../store'
 import { Button, cx, Empty, IconButton, Select } from '../components/ui'
 import { formatCost, formatDuration } from '../lib/util'
+import { SLIM } from '../lib/edition'
 
 // ---------------------------------------------------------------------------
 // Progress
@@ -412,12 +413,16 @@ export function Canvas() {
             <IconButton title="Use as reference (edit)" onClick={() => file && void applyAsInput(file, 'ref')}>
               <Layers size={15} />
             </IconButton>
-            <IconButton title="Use as init image (img2img, local)" onClick={() => file && void applyAsInput(file, 'init')}>
-              <ImageUp size={15} />
-            </IconButton>
-            <IconButton title="Inpaint (local)" onClick={() => file && void applyAsInput(file, 'inpaint')}>
-              <Brush size={15} />
-            </IconButton>
+            {!SLIM && (
+              <>
+                <IconButton title="Use as init image (img2img, local)" onClick={() => file && void applyAsInput(file, 'init')}>
+                  <ImageUp size={15} />
+                </IconButton>
+                <IconButton title="Inpaint (local)" onClick={() => file && void applyAsInput(file, 'inpaint')}>
+                  <Brush size={15} />
+                </IconButton>
+              </>
+            )}
             <IconButton title="Reuse settings" onClick={() => reuseSettings(item)}>
               <Recycle size={15} />
             </IconButton>

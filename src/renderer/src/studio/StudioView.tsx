@@ -3,6 +3,7 @@ import { KeyRound, Sparkles, Wand2 } from 'lucide-react'
 import { useStore } from '../store'
 import { Button, Section, Segmented, TextArea } from '../components/ui'
 import { imagesFromTransfer } from '../lib/util'
+import { SLIM } from '../lib/edition'
 import { LocalModelSelect, OpenRouterModelSelect, ProviderSwitch } from './ModelPicker'
 import { LocalResolution, OpenRouterResolution } from './ResolutionPicker'
 import { HiresSection, LocalParams, LoraSection, OpenRouterParams, PerformanceSection, SkipLayerGuidance, VaeTilingSection } from './Params'
@@ -93,7 +94,7 @@ export function StudioView() {
       <aside className="flex w-[344px] shrink-0 flex-col border-r border-ink-800 bg-ink-900">
         <div className="flex items-center justify-between gap-2 border-b border-ink-800 px-4 py-2.5">
           <ProviderSwitch size="sm" />
-          <Segmented
+          {!SLIM && <Segmented
             size="sm"
             value={settings.studioDetail}
             onChange={(v) => void updateSettings({ studioDetail: v })}
@@ -101,7 +102,7 @@ export function StudioView() {
               { value: 'simple', label: 'Simple' },
               { value: 'advanced', label: 'Advanced', title: 'Inpainting, hires fix, upscaling, LoRA and every sampler parameter' }
             ]}
-          />
+          />}
         </div>
 
         <div className="flex-1 overflow-y-auto">

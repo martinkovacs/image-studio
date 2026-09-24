@@ -3,7 +3,7 @@ import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { IMG_PROTOCOL } from '@shared/types'
 import type { EngineInstallProgress, GenerationProgress, GenerationRequest, UpscaleRequest } from '@shared/types'
-import { getOpenRouterKey, getSettings, setOpenRouterKey, updateSettings } from './settings'
+import { getOpenRouterKey, getSettings, sanitizePatch, setOpenRouterKey, updateSettings } from './settings'
 import { getCredits, listImageModels } from './openrouter'
 import { HistoryStore } from './history'
 import { createGenerator, readFileAsDataUrl } from './generate'
@@ -38,8 +38,11 @@ server.on('log', (line) => send('local:log', line))
  * The renderer may only read files inside the current output directory or files
  * recorded in history (which may live in a previous output directory).
  */
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|svg)$/i
+
 async function assertReadable(p: string): Promise<string> {
   const abs = resolve(p)
+  if (!IMAGE_EXT.test(abs)) throw new Error('Access denied: not an image file')
   const root = resolve(getSettings().outputDir) + sep
   if (abs.startsWith(root) || (await history.hasFile(abs))) return abs
   throw new Error('Access denied: path is not a studio image')
@@ -64,7 +67,17 @@ function str(v: unknown, name: string): string {
 
 function registerIpc(): void {
   ipcMain.handle('settings:get', () => getSettings())
-  ipcMain.handle('settings:update', (_e, patch) => updateSettings(patch))
+  ipcMain.handle('settings:update', (_e, patch) => updateSettings(sanitizePatch(patch)))
+  ipcMain.handle('settings:chooseOutputDir', async () => {
+    const res = await dialog.showOpenDialog(win!, { title: 'Output folder', properties: ['openDirectory', 'createDirectory'] })
+    const dir = res.canceled ? undefined : res.filePaths[0]
+    return dir ? updateSettings({ outputDir: dir }) : null
+  })
+  ipcMain.handle('settings:chooseServerBinary', async () => {
+    const res = await dialog.showOpenDialog(win!, { title: 'sd-server binary', properties: ['openFile'] })
+    const file = res.canceled ? undefined : res.filePaths[0]
+    return file ? updateSettings({ local: { engineVariant: 'custom', customServerPath: file } }) : null
+  })
   ipcMain.handle('settings:setOpenRouterKey', (_e, key) => setOpenRouterKey(key === null ? null : str(key, 'key')))
   ipcMain.handle('settings:pickPath', async (_e, opts: { kind: 'file' | 'directory'; title?: string; filters?: Electron.FileFilter[] }) => {
     const res = await dialog.showOpenDialog(win!, {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { SLIM } from '../lib/edition'
 import { Check, Cloud, Copy, Cpu, Download, FolderOpen, HardDrive, KeyRound, Layers, Palette, Play, RefreshCw, ScrollText, Square } from 'lucide-react'
 import type { EngineInfo, EngineInstallProgress, LocalModelProfile } from '@shared/types'
 import { useStore } from '../store'
@@ -69,8 +70,8 @@ function GeneralTab() {
             <TextInput readOnly value={settings.outputDir} className="font-mono text-[11px]" />
             <Button
               onClick={async () => {
-                const p = await window.api.settings.pickPath({ kind: 'directory', title: 'Output folder' })
-                if (p) await update({ outputDir: p })
+                const s = await window.api.settings.chooseOutputDir()
+                if (s) useStore.setState({ settings: s })
               }}
             >
               <FolderOpen size={13} /> Change…
@@ -207,7 +208,6 @@ function EngineTab() {
   const [info, setInfo] = useState<EngineInfo | null>(null)
   const [progress, setProgress] = useState<Record<string, EngineInstallProgress>>({})
   const [devices, setDevices] = useState<string[] | null>(null)
-  const [custom, setCustom] = useState(settings.local.customServerPath)
 
   const load = async () => setInfo(await window.api.engine.info())
   useEffect(() => {
@@ -299,25 +299,21 @@ function EngineTab() {
                 type="radio"
                 name="engine"
                 checked={selected === 'custom'}
-                onChange={() => void update({ local: { engineVariant: 'custom', customServerPath: custom } })}
+                disabled={!settings.local.customServerPath}
+                onChange={() => void update({ local: { engineVariant: 'custom' } })}
                 className="accent-[var(--color-safelight)]"
               />
               <span className="text-[13px] text-ink-100">Custom sd-server binary</span>
             </div>
             <div className="flex gap-2 pl-7">
-              <TextInput
-                value={custom}
-                onChange={(e) => setCustom(e.target.value)}
-                onBlur={() => void update({ local: { customServerPath: custom } })}
-                placeholder="/path/to/sd-server"
-                className="font-mono text-[11px]"
-              />
+              <TextInput readOnly value={settings.local.customServerPath} placeholder="/path/to/sd-server" className="font-mono text-[11px]" />
               <Button
+                title="Choose binary"
                 onClick={async () => {
-                  const p = await window.api.settings.pickPath({ kind: 'file', title: 'sd-server binary' })
-                  if (p) {
-                    setCustom(p)
-                    await update({ local: { engineVariant: 'custom', customServerPath: p } })
+                  const s = await window.api.settings.chooseServerBinary()
+                  if (s) {
+                    useStore.setState({ settings: s })
+                    void load()
                   }
                 }}
               >
@@ -517,7 +513,7 @@ export function SettingsView() {
     <div className="flex h-full">
       <aside className="w-56 shrink-0 border-r border-ink-800 bg-ink-900 p-3">
         <h2 className="px-2 pb-4 pt-1 font-display text-lg font-semibold text-ink-100">Settings</h2>
-        {TABS.map((t) => (
+        {TABS.filter((t) => !SLIM || t.id === 'general' || t.id === 'openrouter').map((t) => (
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
