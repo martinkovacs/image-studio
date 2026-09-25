@@ -93,7 +93,7 @@ export function LocalModelSelect({ compact }: { compact?: boolean }) {
       )
     }
     return (
-      <div className="rounded-md border border-dashed border-ink-700 p-3 text-xs leading-relaxed text-ink-400">
+      <div className="rounded-md border border-dashed border-ink-700 p-3 text-xs leading-relaxed text-ink-300">
         No local model profiles yet. A profile points sd.cpp at your model files.
         <Button size="sm" className="mt-2 w-full" onClick={() => setView('settings')}>
           Set up local models
@@ -132,7 +132,7 @@ export function LocalModelSelect({ compact }: { compact?: boolean }) {
           </Button>
         )}
       </div>
-      <div className={cx('flex items-center gap-2 font-mono text-[11px] text-ink-400', compact && 'hidden')}>
+      <div className={cx('flex items-center gap-2 font-mono text-[11px] text-ink-300', compact && 'hidden')}>
         <ServerDot />
         {status.state === 'starting' && (
           <>

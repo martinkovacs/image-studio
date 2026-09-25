@@ -91,7 +91,7 @@ export function LocalResolution() {
           />
         </Field>
       </div>
-      <div className="flex items-center justify-between font-mono text-[11px] text-ink-400">
+      <div className="flex items-center justify-between font-mono text-[11px] text-ink-300">
         <span>
           {width}×{height}
         </span>
@@ -114,7 +114,7 @@ export function OpenRouterResolution({ model }: { model: OrImageModel | undefine
   const ar = model?.supported_parameters.aspect_ratio
   if (!model) return null
   if (res?.type !== 'enum' && ar?.type !== 'enum') {
-    return <p className="text-xs text-ink-500">This model picks its own output size; OpenRouter exposes no size controls for it.</p>
+    return <p className="text-xs text-ink-300">This model picks its own output size; OpenRouter exposes no size controls for it.</p>
   }
   return (
     <div className="flex flex-col gap-3">
@@ -147,7 +147,7 @@ export function OpenRouterResolution({ model }: { model: OrImageModel | undefine
         </Field>
       )}
       {res?.type !== 'enum' && (
-        <p className="text-[11px] leading-snug text-ink-500">No resolution tiers for this model; output is typically ~1 MP.</p>
+        <p className="text-[11px] leading-snug text-ink-300">No resolution tiers for this model; output is typically ~1 MP.</p>
       )}
     </div>
   )

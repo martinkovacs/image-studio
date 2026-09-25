@@ -84,13 +84,13 @@ export function RefImages({ orModel }: { orModel?: OrImageModel }) {
         {refs.length < max && (
           <DropZone
             onImages={(urls) => add(urls.slice(0, max - refs.length))}
-            className="flex h-16 w-16 items-center justify-center rounded-md border border-dashed border-ink-600 text-ink-500 hover:border-ink-400 hover:text-ink-300"
+            className="flex h-16 w-16 items-center justify-center rounded-md border border-dashed border-ink-600 text-ink-400 hover:border-ink-400 hover:text-ink-300"
           >
             <ImagePlus size={18} />
           </DropZone>
         )}
       </div>
-      <p className="text-[11px] leading-snug text-ink-500">
+      <p className="text-[11px] leading-snug text-ink-300">
         {note ||
           (refs.length
             ? `Edit mode: the prompt describes the change. ${max < 16 ? `Up to ${max}.` : ''}`
@@ -118,13 +118,13 @@ export function InitImage() {
         ) : (
           <DropZone
             onImages={(u) => setInit(u[0])}
-            className="flex h-16 w-16 items-center justify-center rounded-md border border-dashed border-ink-600 text-ink-500 hover:border-ink-400"
+            className="flex h-16 w-16 items-center justify-center rounded-md border border-dashed border-ink-600 text-ink-400 hover:border-ink-400"
           >
             <ImagePlus size={18} />
           </DropZone>
         )}
         {inputs.maskImage && <Thumb src={inputs.maskImage} onRemove={() => set('inputs', { ...inputs, maskImage: undefined })} label="mask" />}
-        <p className="flex-1 text-[11px] leading-snug text-ink-500">
+        <p className="flex-1 text-[11px] leading-snug text-ink-300">
           img2img: the output starts from this image. Strength controls how much changes.
         </p>
       </div>

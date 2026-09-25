@@ -16,7 +16,7 @@ import type {
   UpscaleRequest,
 } from '../shared/types'
 import type { HistoryStore } from './history'
-import { generateImages, CancelledError } from './openrouter'
+import { generateImages, CancelledError, sanitizeExtraParams } from './openrouter'
 import { IS_SLIM } from '../shared/edition'
 
 /** Message used for every disabled local feature in the slim edition. */
@@ -206,6 +206,8 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     if (!deps.getApiKey()) throw new Error(NO_KEY_MSG)
     const or = req.openrouter
     if (!or) throw new Error('OpenRouter request is missing a model')
+    // Renderer input is never trusted: validate the custom JSON here too.
+    const extra = sanitizeExtraParams(or.extra)
 
     emit(jobId, { stage: 'uploading' })
     if (req.threadId) await deps.history.touchThread(req.threadId).catch(() => undefined)
@@ -215,6 +217,7 @@ export function createGenerator(deps: GeneratorDeps): Generator {
       model: or.model,
       prompt: req.prompt,
       params: or.params,
+      extra,
       refImages: req.inputs.refImages,
       signal: ac.signal,
     })
@@ -222,7 +225,7 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     return finalize(jobId, {
       provider: 'openrouter',
       model: or.model,
-      params: { model: or.model, params: or.params },
+      params: Object.keys(extra).length > 0 ? { model: or.model, params: or.params, extra } : { model: or.model, params: or.params },
       prompt: req.prompt,
       negativePrompt: req.negativePrompt,
       dataUrls: req.inputs.refImages,

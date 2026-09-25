@@ -9,6 +9,8 @@ export interface GenerateImagesArgs {
   model: string
   prompt: string
   params: OrImageParams
+  /** Extra request-body keys (user JSON); merged after params. model/prompt/input_references stay app-controlled. */
+  extra?: Record<string, unknown>
   /** Reference images as data URLs. */
   refImages: string[]
   inputReferenceUrls?: string[]
@@ -82,6 +84,35 @@ function dropEmpty(params: OrImageParams): Record<string, unknown> {
   return out
 }
 
+const MAX_EXTRA_JSON_BYTES = 64 * 1024
+const PROTECTED_BODY_KEYS = ['model', 'prompt', 'input_references']
+
+/**
+ * Validates renderer-supplied extra request-body keys (never trusted): must be
+ * a plain object, at most 64 KB once serialized, and the model, prompt and
+ * input_references keys the app controls are always dropped.
+ */
+export function sanitizeExtraParams(extra: unknown): Record<string, unknown> {
+  if (extra === undefined) return {}
+  if (typeof extra !== 'object' || extra === null || Array.isArray(extra)) {
+    throw new Error('Custom parameters must be a JSON object')
+  }
+  let flat: string
+  try {
+    flat = JSON.stringify(extra) ?? ''
+  } catch {
+    throw new Error('Custom parameters must be a JSON object')
+  }
+  if (flat.length > MAX_EXTRA_JSON_BYTES) {
+    throw new Error('Custom parameters are too large (64 KB limit)')
+  }
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(extra)) {
+    if (!PROTECTED_BODY_KEYS.includes(k)) out[k] = v
+  }
+  return out
+}
+
 /** 5-minute timeout combined with the caller's signal (when present). */
 function combineSignal(signal?: AbortSignal): AbortSignal {
   return signal
@@ -121,9 +152,12 @@ export async function generateImages(
   args: GenerateImagesArgs,
 ): Promise<GenerateImagesResult> {
   const body: Record<string, unknown> = {
+    ...dropEmpty(args.params),
+    // User JSON last, so it overrides the normalized params — but the
+    // model, prompt and input_references below are always the app's values.
+    ...(args.extra ?? {}),
     model: args.model,
     prompt: args.prompt,
-    ...dropEmpty(args.params),
     input_references:
       (args.refImages.length > 0 || args.inputReferenceUrls?.length)
         ? [

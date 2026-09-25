@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, FolderOpen, Maximize2, MessageSquarePlus, Paperclip, Pencil, Ruler, Trash2, X } from 'lucide-react'
+import { ArrowUp, Braces, FolderOpen, Maximize2, MessageSquarePlus, Paperclip, Pencil, Ruler, Trash2, X } from 'lucide-react'
 import { imgUrl, type ChatThread, type HistoryItem } from '@shared/types'
 import { useStore } from '../store'
 import { Chip, cx, IconButton } from '../components/ui'
 import { fileToDataUrl, formatCost, formatDuration, imagesFromTransfer } from '../lib/util'
 import { LocalModelSelect, OpenRouterModelSelect, ProviderSwitch, ServerDot } from '../studio/ModelPicker'
 import { LocalResolution, OpenRouterResolution } from '../studio/ResolutionPicker'
+import { ExtraJson } from '../studio/ExtraJson'
 import { JobProgress } from '../studio/Canvas'
 
 const EXAMPLES = [
@@ -49,6 +50,32 @@ function SizePopover() {
       {open && (
         <div className="rise absolute right-0 top-full z-40 mt-2 w-80 rounded-lg border border-ink-700 bg-ink-900 p-4 shadow-2xl">
           {provider === 'local' ? <LocalResolution /> : <OpenRouterResolution model={model} />}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Custom OpenRouter JSON parameters, opened from the composer header. */
+function ExtraJsonPopover() {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const hasJson = useStore((s) => !!s.orExtraJson.trim())
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false)
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+  return (
+    <div ref={ref} className="relative">
+      <IconButton title="Custom parameters (JSON)" active={open || hasJson} onClick={() => setOpen(!open)}>
+        <Braces size={15} />
+      </IconButton>
+      {open && (
+        <div className="rise absolute right-0 top-full z-40 mt-2 w-96 rounded-lg border border-ink-700 bg-ink-900 p-4 shadow-2xl">
+          <span className="label-caps mb-2 block">Custom parameters (JSON)</span>
+          <ExtraJson />
         </div>
       )}
     </div>
@@ -118,7 +145,7 @@ function ThreadList({
                 await window.api.history.deleteThread(t.id)
                 onChanged()
               }}
-              className="hidden text-ink-500 hover:text-stop group-hover:block"
+              className="hidden text-ink-300 hover:text-stop group-hover:block"
             >
               <Trash2 size={12} />
             </button>
@@ -175,7 +202,7 @@ function Message({ item, onEdit }: { item: HistoryItem; onEdit: (path: string) =
             </div>
           ))}
         </div>
-        <span className="font-mono text-[10px] text-ink-500">
+        <span className="font-mono text-[10px] text-ink-300">
           {item.model.split('/').pop()} · {item.width}×{item.height}
           {item.seed != null && ` · seed ${item.seed}`} · {formatDuration(item.durationMs)}
           {cost && ` · ${cost}`}
@@ -298,6 +325,7 @@ export function ChatView() {
           <div className="w-72">{provider === 'local' ? <LocalModelSelect compact /> : <OpenRouterModelSelect />}</div>
           {provider === 'local' && <ServerDot />}
           <SizePopover />
+          {provider === 'openrouter' && <ExtraJsonPopover />}
         </header>
 
         <div
@@ -320,7 +348,7 @@ export function ChatView() {
                 <h1 className="font-display text-4xl font-semibold tracking-tight text-ink-100">
                   What should we <span className="text-safelight">develop</span>?
                 </h1>
-                <p className="max-w-md text-sm text-ink-400">Describe an image, or attach one and say how to change it. Each reply builds on the last image.</p>
+                <p className="max-w-md text-sm text-ink-300">Describe an image, or attach one and say how to change it. Each reply builds on the last image.</p>
                 <div className="grid max-w-2xl grid-cols-2 gap-2">
                   {EXAMPLES.map((ex) => (
                     <button
@@ -384,7 +412,7 @@ export function ChatView() {
                 {autoAttach && lastOutput && (
                   <div className="flex items-center gap-2" title="The last image is attached automatically">
                     <img src={imgUrl(lastOutput)} className="h-14 w-14 rounded-lg border border-dashed border-safelight/60 object-cover opacity-80" />
-                    <span className="font-mono text-[10px] text-ink-500">editing last image</span>
+                    <span className="font-mono text-[10px] text-ink-300">editing last image</span>
                   </div>
                 )}
               </div>
@@ -421,7 +449,7 @@ export function ChatView() {
                   }
                 }}
                 placeholder={autoAttach ? 'Describe the next change…' : 'Describe an image…'}
-                className="max-h-48 min-h-9 flex-1 resize-none bg-transparent px-2 py-2 text-[14px] leading-[22px] text-ink-100 outline-none placeholder:text-ink-500"
+                className="max-h-48 min-h-9 flex-1 resize-none bg-transparent px-2 py-2 text-[14px] leading-[22px] text-ink-100 outline-none placeholder:text-ink-300"
               />
               <button
                 onClick={() => void send()}

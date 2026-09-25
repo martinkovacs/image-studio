@@ -55,7 +55,7 @@ export function IconButton({
 export function Hint({ text }: { text: string }) {
   return (
     <span className="group relative inline-flex">
-      <Info size={12} className="text-ink-500 group-hover:text-ink-300" />
+      <Info size={12} className="text-ink-400 group-hover:text-ink-300" />
       <span className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 hidden w-60 -translate-x-1/2 rounded-md border border-ink-700 bg-ink-900 p-2 text-[11px] leading-snug normal-case tracking-normal text-ink-200 shadow-xl group-hover:block">
         {text}
       </span>
@@ -82,30 +82,41 @@ export function Section({
   title,
   children,
   defaultOpen = true,
+  open,
+  onToggle,
   aside
 }: {
   title: string
   children: ReactNode
   defaultOpen?: boolean
+  /** Controlled open state; omitted keeps the default uncontrolled behaviour. */
+  open?: boolean
+  /** Notified on every toggle; usable in both controlled and uncontrolled modes. */
+  onToggle?: (open: boolean) => void
   aside?: ReactNode
 }) {
-  const [open, setOpen] = useState(defaultOpen)
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen)
+  const isOpen = open ?? uncontrolledOpen
+  const toggle = () => {
+    setUncontrolledOpen(!isOpen)
+    onToggle?.(!isOpen)
+  }
   return (
     <section className="border-b border-ink-800">
       <div className="flex items-center gap-2 px-4 py-2.5">
-        <button onClick={() => setOpen(!open)} className="flex flex-1 items-center gap-2 text-left">
-          <ChevronDown size={13} className={cx('text-ink-500 transition-transform', !open && '-rotate-90')} />
+        <button onClick={toggle} className="flex flex-1 items-center gap-2 text-left">
+          <ChevronDown size={13} className={cx('text-ink-400 transition-transform', !isOpen && '-rotate-90')} />
           <span className="font-display text-[13px] font-semibold tracking-tight text-ink-200">{title}</span>
         </button>
         {aside}
       </div>
-      {open && <div className="flex flex-col gap-4 px-4 pb-4">{children}</div>}
+      {isOpen && <div className="flex flex-col gap-4 px-4 pb-4">{children}</div>}
     </section>
   )
 }
 
 const inputBase =
-  'h-8 w-full rounded-md border border-ink-700 bg-ink-900 px-2.5 text-[13px] text-ink-100 outline-none placeholder:text-ink-500 focus:border-safelight/70'
+  'h-8 w-full rounded-md border border-ink-700 bg-ink-900 px-2.5 text-[13px] text-ink-100 outline-none placeholder:text-ink-300 focus:border-safelight/70'
 
 export function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={cx(inputBase, props.className)} />
@@ -116,7 +127,7 @@ export function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement
     <textarea
       {...props}
       className={cx(
-        'w-full resize-none rounded-md border border-ink-700 bg-ink-900 px-2.5 py-2 text-[13px] leading-relaxed text-ink-100 outline-none placeholder:text-ink-500 focus:border-safelight/70',
+        'w-full resize-none rounded-md border border-ink-700 bg-ink-900 px-2.5 py-2 text-[13px] leading-relaxed text-ink-100 outline-none placeholder:text-ink-300 focus:border-safelight/70',
         props.className
       )}
     />
@@ -306,7 +317,7 @@ export function Segmented<T extends string>({
           className={cx(
             'flex items-center gap-1.5 rounded-[5px] font-medium transition-colors',
             size === 'sm' ? 'h-6 px-2 text-[11px]' : 'h-7 px-3 text-xs',
-            value === o.value ? 'bg-ink-700 text-ink-100' : 'text-ink-400 hover:text-ink-200'
+            value === o.value ? 'bg-ink-700 text-ink-100' : 'text-ink-300 hover:text-ink-200'
           )}
         >
           {o.label}
@@ -384,7 +395,7 @@ export function Combobox({
         }}
         className={cx(inputBase, 'flex items-center justify-between text-left')}
       >
-        <span className={cx('truncate', !current && 'text-ink-500')}>{current?.label ?? (value || placeholder)}</span>
+        <span className={cx('truncate', !current && 'text-ink-300')}>{current?.label ?? (value || placeholder)}</span>
         <ChevronDown size={13} className="shrink-0 text-ink-400" />
       </button>
       {open && (
@@ -416,7 +427,7 @@ export function Combobox({
               >
                 <span className="min-w-0">
                   <span className="block truncate text-[13px] text-ink-100">{i.label}</span>
-                  {i.sub && <span className="block truncate font-mono text-[10px] text-ink-500">{i.sub}</span>}
+                  {i.sub && <span className="block truncate font-mono text-[10px] text-ink-300">{i.sub}</span>}
                 </span>
                 {i.badge && (
                   <span className="shrink-0 rounded bg-safelight/15 px-1.5 py-0.5 font-mono text-[10px] text-safelight">
@@ -425,7 +436,7 @@ export function Combobox({
                 )}
               </button>
             ))}
-            {filtered.length === 0 && <div className="px-2.5 py-3 text-xs text-ink-500">No matches</div>}
+            {filtered.length === 0 && <div className="px-2.5 py-3 text-xs text-ink-300">No matches</div>}
           </div>
         </div>
       )}
@@ -436,9 +447,9 @@ export function Combobox({
 export function Empty({ icon, title, children }: { icon: ReactNode; title: string; children?: ReactNode }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 p-8 text-center">
-      <div className="text-ink-600">{icon}</div>
+      <div className="text-ink-400">{icon}</div>
       <div className="font-display text-base font-semibold text-ink-300">{title}</div>
-      {children && <div className="max-w-sm text-xs leading-relaxed text-ink-500">{children}</div>}
+      {children && <div className="max-w-sm text-xs leading-relaxed text-ink-300">{children}</div>}
     </div>
   )
 }
