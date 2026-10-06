@@ -79,20 +79,23 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Release on pushes to main and on v* tags (not on PRs or manual runs).
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # No checkout in this job, so tell gh which repo to use.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
 
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Collect release assets
         # download-artifact puts every artifact into its own subdirectory.
         # Asset names are flattened by gh, so if two editions produce the same
         # file name (e.g. Squirrel's RELEASES), prefix the later ones with the
@@ -107,4 +110,19 @@ jobs:
             cp "$f" "upload/$base"
           done
           ls -la upload
-          gh release create "$GITHUB_REF_NAME" --generate-notes upload/*
+
+      - name: Create GitHub release
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # Normal versioned release from a v* tag.
+            gh release create "$GITHUB_REF_NAME" --generate-notes upload/*
+          else
+            # Commit on main: create a new tag at this commit and mark it as a prerelease.
+            tag="build-${GITHUB_RUN_NUMBER}"
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "Build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
+              --prerelease \
+              --generate-notes \
+              upload/*
+          fi
