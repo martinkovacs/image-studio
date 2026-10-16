@@ -79,3 +79,53 @@ export function resolveInstall(
   const totalBytes = downloads.reduce((n, d) => n + d.files.reduce((k, f) => k + f.size, 0), 0)
   return { components, totalBytes, downloads }
 }
+
+/** GPUs below this get 8-bit text-encoder quantization on diffusers recipes that support it. */
+const TE_QUANT_BELOW_MIB = 23 * 1024
+
+/** Recipe launch args adjusted to the machine (e.g. text-encoder quantization on smaller GPUs). */
+export function recommendedArgs(recipe: CatalogRecipe, vramMiB: number | null): CatalogRecipe['args'] {
+  const args = { ...recipe.args }
+  if (args['text-encoder-quant'] === 'none' && vramMiB !== null && vramMiB < TE_QUANT_BELOW_MIB) args['text-encoder-quant'] = '8bit'
+  return args
+}
+
+export type InstallFit = 'fits' | 'offload' | 'too-big'
+
+/**
+ * Whether an install can run here. Both backends offload to system RAM
+ * (diffusers: model CPU offload, sd.cpp: --offload-to-cpu), so only the
+ * largest single module must fit VRAM; everything together must fit VRAM + RAM.
+ * A diffusers pipeline counts per subfolder (text_encoder/, vae/, …), and
+ * 8-bit text-encoder quantization roughly halves text_encoder/.
+ */
+export function installFit(
+  resolved: ResolvedInstall,
+  args: CatalogRecipe['args'],
+  vramMiB: number | null,
+  ramMiB: number
+): { fit: InstallFit; largestBytes: number } {
+  const teFactor = args['text-encoder-quant'] === '8bit' ? 0.55 : args['text-encoder-quant'] === '4bit' ? 0.3 : 1
+  const modules: number[] = []
+  for (const rc of resolved.components) {
+    if (rc.component.kind !== 'diffusers') {
+      if (rc.bytes) modules.push(rc.bytes)
+      continue
+    }
+    const byFolder = new Map<string, number>()
+    for (const f of rc.files) {
+      const top = f.path.includes('/') ? f.path.slice(0, f.path.indexOf('/')) : ''
+      byFolder.set(top, (byFolder.get(top) ?? 0) + f.size * (top === 'text_encoder' ? teFactor : 1))
+    }
+    modules.push(...byFolder.values())
+  }
+  const total = modules.reduce((n, b) => n + b, 0)
+  const largestBytes = Math.max(0, ...modules)
+  const MiB = 1024 * 1024
+  const ram = ramMiB * MiB * 0.7
+  if (vramMiB === null) return { fit: total * 1.2 <= ram ? 'fits' : 'too-big', largestBytes }
+  const vram = vramMiB * MiB
+  if (total * 1.2 <= vram) return { fit: 'fits', largestBytes }
+  if (largestBytes * 1.15 <= vram && total <= vram + ram) return { fit: 'offload', largestBytes }
+  return { fit: 'too-big', largestBytes }
+}

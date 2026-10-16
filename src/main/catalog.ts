@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { AppSettings, CatalogInstallRequest, DeepPartial, HfRepoDetails, LocalModelProfile } from '@shared/types'
 import { CATALOG_BY_ID, catalogInstallKey } from '@shared/catalog'
-import { resolveInstall, type ResolvedInstall } from '@shared/catalogResolve'
+import { recommendedArgs, resolveInstall, type ResolvedInstall } from '@shared/catalogResolve'
 import type { DownloadManager } from './hf/downloads'
 
 export interface CatalogDeps {
@@ -15,17 +15,20 @@ export interface CatalogDeps {
   updateSettings: (patch: DeepPartial<AppSettings>) => Promise<AppSettings>
   /** Called after the profile was added (the renderer refreshes its settings). */
   onProfileCreated: (settings: AppSettings) => void
+  /** Largest GPU's VRAM, for machine-specific launch args. */
+  vramMiB: () => Promise<number | null>
 }
 
 /** Profile for a finished install: recipe args plus every file slot pointing at the downloaded files. */
 export function profileFromInstall(
   req: CatalogInstallRequest,
   resolved: ResolvedInstall,
-  localDir: (repo: string) => string
+  localDir: (repo: string) => string,
+  vramMiB: number | null
 ): LocalModelProfile {
   const model = CATALOG_BY_ID.get(req.catalogId)!
   const recipe = model.recipes[req.backend]!
-  const args: LocalModelProfile['args'] = { ...recipe.args }
+  const args: LocalModelProfile['args'] = recommendedArgs(recipe, vramMiB)
   for (const rc of resolved.components) {
     if (rc.slotPath === null) continue
     const dir = localDir(rc.repo)
@@ -63,7 +66,7 @@ export async function installCatalogModel(req: CatalogInstallRequest, deps: Cata
       try {
         const results = await Promise.all(ids.map((id) => deps.downloads.whenDone(id)))
         if (results.some((r) => r.state !== 'done')) return
-        const profile = profileFromInstall({ ...req, quants }, resolved, (r) => deps.downloads.localDir(r))
+        const profile = profileFromInstall({ ...req, quants }, resolved, (r) => deps.downloads.localDir(r), await deps.vramMiB())
         const settings = deps.getSettings()
         // Re-installing (e.g. another quant) replaces nothing: each install adds its own profile.
         const next = await deps.updateSettings({

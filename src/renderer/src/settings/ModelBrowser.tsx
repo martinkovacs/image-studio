@@ -11,7 +11,7 @@ import type {
   LocalModelProfile
 } from '@shared/types'
 import { CATALOG, catalogInstallKey, type CatalogModel } from '@shared/catalog'
-import { ORIGINAL, quantChoices, resolveInstall, type ResolvedInstall } from '@shared/catalogResolve'
+import { installFit, ORIGINAL, quantChoices, recommendedArgs, resolveInstall, type InstallFit, type ResolvedInstall } from '@shared/catalogResolve'
 import { formatBytes, quantFit } from '@shared/quants'
 import { useStore } from '../store'
 import { Button, cx, Segmented, Select, TextInput } from '../components/ui'
@@ -99,6 +99,23 @@ function FitBadge({ bytes }: { bytes: number }) {
   )
 }
 
+const INSTALL_FIT = {
+  fits: { style: FIT_STYLE.fits, label: 'fits', hint: 'Everything fits in GPU memory.' },
+  offload: { style: FIT_STYLE.offload, label: 'runs with offload', hint: 'Modules take turns on the GPU; the rest waits in system RAM. Slower, but works.' },
+  'too-big': { style: FIT_STYLE['too-big'], label: 'too big', hint: 'The largest module does not fit in VRAM, or the whole model does not fit in VRAM + RAM. Pick a smaller quant.' }
+} satisfies Record<InstallFit, { style: string; label: string; hint: string }>
+
+function InstallFitBadge({ resolved, args }: { resolved: ResolvedInstall; args: Record<string, string | number | boolean> }) {
+  const { vramMiB, ramMiB } = useMemoryBudget()
+  const { fit, largestBytes } = installFit(resolved, args, vramMiB, ramMiB)
+  const f = INSTALL_FIT[fit]
+  return (
+    <span title={`${f.hint} Largest module: ${formatBytes(largestBytes)}.`} className={cx('rounded border px-1.5 py-px font-mono text-[10px] uppercase tracking-wide', f.style)}>
+      {f.label}
+    </span>
+  )
+}
+
 function Bar({ value, total }: { value: number; total: number }) {
   const pct = total > 0 ? Math.min(100, (value / total) * 100) : 0
   return (
@@ -168,6 +185,9 @@ function CatalogCard({ model, downloads }: { model: CatalogModel; downloads: HfD
     }
   }
 
+  const { vramMiB } = useMemoryBudget()
+  const args = recommendedArgs(recipe, vramMiB)
+  const autoTeQuant = args['text-encoder-quant'] !== recipe.args['text-encoder-quant']
   const key = catalogInstallKey(model.id, backend)
   const mine = downloads.filter((d) => d.catalogId === key)
   const running = mine.filter(isActive)
@@ -257,6 +277,7 @@ function CatalogCard({ model, downloads }: { model: CatalogModel; downloads: HfD
             </p>
           )}
           <p className="text-[11px] leading-relaxed text-ink-500">{recipe.note}</p>
+          {autoTeQuant && <p className="text-[11px] text-ink-400">This GPU has under 24 GB, so the profile quantizes the text encoder to 8-bit.</p>}
 
           <div className="flex flex-col divide-y divide-ink-800 rounded-md border border-ink-800">
             {recipe.components.map((c) => {
@@ -297,7 +318,7 @@ function CatalogCard({ model, downloads }: { model: CatalogModel; downloads: HfD
             {resolved && (
               <>
                 <span className="font-mono text-[12px] text-ink-200">{formatBytes(resolved.totalBytes)} total</span>
-                <FitBadge bytes={resolved.totalBytes} />
+                <InstallFitBadge resolved={resolved} args={args} />
               </>
             )}
             <div className="flex-1" />
@@ -534,7 +555,7 @@ function SearchTab({ downloads }: { downloads: HfDownloadProgress[] }) {
                 {m.gated && <Lock size={11} className="shrink-0 text-safelight" />}
               </div>
               <div className="truncate font-mono text-[10px] text-ink-500">
-                {[m.pipelineTag, m.libraryName, m.tags.includes('gguf') ? 'gguf' : null].filter(Boolean).join(' · ')}
+                {[...new Set([m.pipelineTag, m.libraryName, m.tags.includes('gguf') ? 'gguf' : null].filter(Boolean))].join(' · ')}
               </div>
             </div>
             <span className="flex shrink-0 items-center gap-3 font-mono text-[11px] text-ink-400">

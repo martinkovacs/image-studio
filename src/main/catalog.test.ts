@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { HfFile, HfRepoDetails } from './types'
-import { CATALOG, type CatalogRecipe } from './catalog'
-import { ORIGINAL, resolveInstall } from './catalogResolve'
-import { groupQuants } from './quants'
-import { filesForDiffusersRepo, getRepoDetails } from '../main/hf/hub'
+import type { HfFile, HfRepoDetails } from '@shared/types'
+import { CATALOG, type CatalogRecipe } from '@shared/catalog'
+import { installFit, ORIGINAL, recommendedArgs, resolveInstall, type ResolvedInstall } from '@shared/catalogResolve'
+import { groupQuants } from '@shared/quants'
+import { filesForDiffusersRepo, getRepoDetails } from './hf/hub'
 
 function repo(id: string, files: HfFile[], diffusers?: { all: string[]; withoutTransformer: string[] }): HfRepoDetails {
   return {
@@ -90,8 +90,38 @@ describe('resolveInstall', () => {
   })
 })
 
+const GiB = 1024 ** 3
+function fakeInstall(diffusers: Record<string, number>, others: number[] = []): ResolvedInstall {
+  const files = Object.entries(diffusers).map(([folder, size]) => ({ path: `${folder}/w.safetensors`, size }))
+  const components = [
+    { component: recipe.components[0], repo: 'o/base', files, bytes: files.reduce((n, f) => n + f.size, 0), slotPath: '' },
+    ...others.map((bytes) => ({ component: recipe.components[1], repo: 'o/gguf', files: [{ path: 'x.gguf', size: bytes }], bytes, slotPath: 'x.gguf' }))
+  ]
+  return { components, totalBytes: components.reduce((n, c) => n + c.bytes, 0), downloads: [] }
+}
+
+describe('recommendedArgs / installFit', () => {
+  const qwen = CATALOG.find((m) => m.id === 'qwen-image-2.1')!.recipes.diffusers!
+
+  it('quantizes the text encoder to 8-bit below 24 GB of VRAM only', () => {
+    expect(recommendedArgs(qwen, 16 * 1024)['text-encoder-quant']).toBe('8bit')
+    expect(recommendedArgs(qwen, 24 * 1024)['text-encoder-quant']).toBe('none')
+    expect(recommendedArgs(qwen, null)['text-encoder-quant']).toBe('none')
+  })
+
+  it('judges the largest module against VRAM and the total against VRAM + RAM', () => {
+    // Qwen-Image 2.1 on diffusers: 17.5 GB text encoder + 7 GB GGUF transformer, 16 GB GPU, 32 GB RAM.
+    const install = fakeInstall({ text_encoder: 17.5 * GiB, vae: 1.3 * GiB }, [7.1 * GiB])
+    expect(installFit(install, { 'text-encoder-quant': 'none' }, 16 * 1024, 32 * 1024).fit).toBe('too-big')
+    expect(installFit(install, { 'text-encoder-quant': '8bit' }, 16 * 1024, 32 * 1024).fit).toBe('offload')
+    expect(installFit(install, { 'text-encoder-quant': 'none' }, 48 * 1024, 32 * 1024).fit).toBe('fits')
+    // Not enough RAM to hold what does not fit on the GPU.
+    expect(installFit(install, { 'text-encoder-quant': '8bit' }, 16 * 1024, 1024).fit).toBe('too-big')
+  })
+})
+
 // Live check of every catalog recipe against the real Hugging Face file lists:
-//   HF_LIVE=1 npx vitest run src/shared/catalogResolve.test.ts
+//   HF_LIVE=1 npx vitest run src/main/catalog.test.ts
 // Gated repos are skipped unless HF_TOKEN is set.
 describe.skipIf(!process.env.HF_LIVE)('catalog against huggingface.co', () => {
   for (const model of CATALOG) {

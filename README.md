@@ -20,7 +20,7 @@ Providers:
 
 **Settings → Local engine → Backend** picks *Auto* (diffusers when `nvidia-smi` reports an NVIDIA GPU with ≥ 6 GB, sd.cpp otherwise) or forces either backend. Each profile belongs to one backend; the studio lists the profiles of the backend in use.
 
-The diffusers server never loads pickled weights (`use_safetensors=True`), never runs repo code (`trust_remote_code` off, `model_index.json` components must come from `diffusers`/`transformers`), runs with `HF_HUB_OFFLINE=1` and only listens on 127.0.0.1. Its tests run without torch: `cd resources/diffusers && python3 -I -m unittest test_server -v`.
+The diffusers server never loads pickled weights (`use_safetensors=True`), never runs repo code (`trust_remote_code` off, `model_index.json` components must come from `diffusers`/`transformers`), runs with `HF_HUB_OFFLINE=1` and only listens on 127.0.0.1. Its tests run without torch: `cd resources/diffusers && python3 -I -m unittest discover -s . -v`.
 
 ## Model browser
 
@@ -48,7 +48,7 @@ The only model-specific code is the **supported-model catalog** (`src/shared/cat
 | FLUX.2 [klein] 9B | 1015 | `Flux2KleinPipeline` (gated) + optional GGUF transformer | GGUF + Qwen3 8B GGUF |
 | FLUX.2 [dev] | 1000 | `Flux2Pipeline` (4-bit) | GGUF + Mistral Small 3.2 GGUF |
 
-Not included: HunyuanImage 3.0 Instruct (1064; neither diffusers nor sd.cpp support it, ~169 GB) and FLUX.2 [dev] Flash (1014; API-only, no public weights). Any other model still works through a hand-made profile. `HF_LIVE=1 npx vitest run src/shared/catalogResolve.test.ts` checks every recipe against the live Hub.
+Not included: HunyuanImage 3.0 Instruct (1064; neither diffusers nor sd.cpp support it, ~169 GB) and FLUX.2 [dev] Flash (1014; API-only, no public weights). Any other model still works through a hand-made profile. `HF_LIVE=1 npx vitest run src/main/catalog.test.ts` checks every recipe against the live Hub.
 
 ## Resolution & 4K
 

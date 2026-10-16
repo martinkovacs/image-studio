@@ -29,6 +29,16 @@ jobs:
       - name: Test
         run: npm test
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Needs Pillow only; torch/diffusers are imported lazily and not exercised here.
+      - name: Test diffusers server
+        run: |
+          pip install pillow
+          python -I -m unittest discover -s resources/diffusers -v
+
   package:
     needs: check
     strategy:

@@ -103,6 +103,9 @@ async function resolveLaunch(settings: AppSettings, profile: LocalModelProfile):
 const downloads = new DownloadManager({ modelsDir: () => getSettings().local.modelsDir, token: getHfToken })
 downloads.on('progress', (p) => send('hf:progress', p))
 
+const maxVram = (gpus: { vramMiB: number | null }[]): number | null =>
+  gpus.reduce<number | null>((m, g) => (g.vramMiB !== null && (m === null || g.vramMiB > m) ? g.vramMiB : m), null)
+
 /** Repo file list (+ the diffusers pipeline subset), read with the stored token. */
 async function repoDetails(id: string): Promise<HfRepoDetails> {
   const details = await getRepoDetails(id, { token: getHfToken() })
@@ -279,7 +282,14 @@ function registerIpc(): void {
     const quants = req?.quants && typeof req.quants === 'object' && !Array.isArray(req.quants) ? req.quants : {}
     return installCatalogModel(
       { catalogId: str(req?.catalogId, 'model'), backend, quants },
-      { downloads, repoDetails, getSettings, updateSettings, onProfileCreated: (s) => send('settings:changed', s) }
+      {
+        downloads,
+        repoDetails,
+        getSettings,
+        updateSettings,
+        onProfileCreated: (s) => send('settings:changed', s),
+        vramMiB: async () => maxVram((await probeHardware()).gpus)
+      }
     )
   })
 
