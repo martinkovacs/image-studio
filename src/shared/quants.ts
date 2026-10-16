@@ -153,27 +153,81 @@ function trimSeps(s: string): string {
   return s.replace(/[._-]+$/, '')
 }
 
-/** Groups .gguf files by (stem, quant), sums sizes, sorts by stem then bits ascending (unknown last). */
+interface CollectedFile {
+  parsed: ParsedQuant
+  file: HfFile
+}
+
+interface CollectedGroup {
+  quant: string
+  bits: number | null
+  stem: string
+  files: CollectedFile[]
+}
+
+/**
+ * Groups .gguf files by (stem, quant), sums sizes, sorts by stem then bits
+ * ascending (unknown last). Repos ship either a single complete GGUF or a
+ * shard set for the same weights — never both in a group: the single file
+ * wins (simpler download), and among shard sets only the smallest complete
+ * one (every index 1..count) is kept.
+ */
 export function groupQuants(files: HfFile[]): HfQuantGroup[] {
-  const groups = new Map<string, HfQuantGroup>()
+  const collected = new Map<string, CollectedGroup>()
   for (const f of files) {
     if (!/\.gguf$/i.test(f.path)) continue
     const parsed = parseQuant(f.path)
     if (!parsed) continue
     const key = `${parsed.stem}\u0000${parsed.quant}`
-    let g = groups.get(key)
+    let g = collected.get(key)
     if (!g) {
-      g = { quant: parsed.quant, bits: parsed.bits, files: [], totalBytes: 0, stem: parsed.stem }
-      groups.set(key, g)
+      g = { quant: parsed.quant, bits: parsed.bits, stem: parsed.stem, files: [] }
+      collected.set(key, g)
     }
-    g.files.push({ path: f.path, size: f.size, ...(f.sha256 !== undefined ? { sha256: f.sha256 } : {}) })
-    g.totalBytes += f.size
+    g.files.push({ parsed, file: f })
   }
-  return [...groups.values()].sort((a, b) =>
+  const groups = [...collected.values()].map((c) => {
+    const singles = c.files.filter((e) => e.parsed.shard === null)
+    const chosen = singles.length > 0 ? singles : (bestShardSet(c.files) ?? [])
+    return {
+      quant: c.quant,
+      bits: c.bits,
+      stem: c.stem,
+      files: chosen.map((e) => ({
+        path: e.file.path,
+        size: e.file.size,
+        ...(e.file.sha256 !== undefined ? { sha256: e.file.sha256 } : {})
+      })),
+      totalBytes: chosen.reduce((n, e) => n + e.file.size, 0)
+    }
+  })
+  return groups
+    .filter((g) => g.files.length > 0)
+    .sort((a, b) =>
     a.stem.localeCompare(b.stem) ||
     (a.bits ?? Number.POSITIVE_INFINITY) - (b.bits ?? Number.POSITIVE_INFINITY) ||
     a.quant.localeCompare(b.quant)
   )
+}
+
+/** Complete shard set with the fewest shards; null when none is complete. */
+function bestShardSet(files: CollectedFile[]): CollectedFile[] | null {
+  const byCount = new Map<number, CollectedFile[]>()
+  for (const e of files) {
+    if (!e.parsed.shard) continue
+    const list = byCount.get(e.parsed.shard.count) ?? []
+    list.push(e)
+    byCount.set(e.parsed.shard.count, list)
+  }
+  let best: { count: number; files: CollectedFile[] } | null = null
+  for (const [count, list] of byCount) {
+    const have = new Set(list.map((e) => e.parsed.shard!.index))
+    let complete = true
+    for (let i = 1; i <= count; i++) if (!have.has(i)) complete = false
+    if (!complete) continue
+    if (!best || count < best.count) best = { count, files: list }
+  }
+  return best?.files ?? null
 }
 
 /**

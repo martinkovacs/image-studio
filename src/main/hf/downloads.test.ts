@@ -160,12 +160,16 @@ describe('DownloadManager', () => {
     expect(resolve.headers.authorization).toBe('Bearer hf_tok')
   })
 
-  it('skips files that already exist with the expected size', async () => {
+  it('skips files the manifest vouches for, without a fetch', async () => {
     const a = Buffer.from('A'.repeat(10))
     const b = Buffer.from('B'.repeat(5))
-    const dest = path.join(dir, 'owner', 'repo', 'a.gguf')
-    await fs.mkdir(path.dirname(dest), { recursive: true })
+    const repoDir = path.join(dir, 'owner', 'repo')
+    const dest = path.join(repoDir, 'a.gguf')
+    await fs.mkdir(repoDir, { recursive: true })
     await fs.writeFile(dest, Buffer.alloc(10, 7)) // same size, different content
+    await fs.writeFile(path.join(repoDir, '.image-studio-files.json'), JSON.stringify({
+      'a.gguf': { size: 10, sha256: sha256(a), revision: 'main' }
+    }))
     const { fetchImpl, calls } = repoFetch({ 'a.gguf': a, 'b.gguf': b })
     const mgr = makeManager(fetchImpl, dir)
     const id = mgr.enqueue({
@@ -182,6 +186,90 @@ describe('DownloadManager', () => {
     expect((await fs.readFile(dest)).equals(Buffer.alloc(10, 7))).toBe(true) // untouched
     expect(calls.filter((c) => c.url.includes('a.gguf'))).toHaveLength(0)
     expect(calls.some((c) => c.url.includes('b.gguf'))).toBe(true)
+  })
+
+  it('re-downloads same-size files the manifest does not vouch for', async () => {
+    const a = Buffer.from('A'.repeat(10))
+    const b = Buffer.from('B'.repeat(10))
+    const repoDir = path.join(dir, 'owner', 'repo')
+    await fs.mkdir(repoDir, { recursive: true })
+    await fs.writeFile(path.join(repoDir, 'a.gguf'), Buffer.alloc(10, 7)) // from another revision
+    await fs.writeFile(path.join(repoDir, 'b.gguf'), Buffer.alloc(10, 8)) // never verified
+    await fs.writeFile(path.join(repoDir, '.image-studio-files.json'), JSON.stringify({
+      'a.gguf': { size: 10, sha256: 'f'.repeat(64), revision: 'main' }
+    }))
+    const { fetchImpl, calls } = repoFetch({ 'a.gguf': a, 'b.gguf': b })
+    const mgr = makeManager(fetchImpl, dir)
+    const done = await mgr.whenDone(
+      mgr.enqueue({
+        repo: 'owner/repo',
+        files: ['a.gguf', 'b.gguf'],
+        expected: [
+          { path: 'a.gguf', size: 10, sha256: sha256(a) },
+          { path: 'b.gguf', size: 10, sha256: sha256(b) }
+        ]
+      })
+    )
+    expect(done.state).toBe('done')
+    expect(calls.some((c) => c.url.includes('/a.gguf'))).toBe(true)
+    expect(calls.some((c) => c.url.includes('/b.gguf'))).toBe(true)
+    expect((await fs.readFile(path.join(repoDir, 'a.gguf'))).equals(a)).toBe(true)
+    expect((await fs.readFile(path.join(repoDir, 'b.gguf'))).equals(b)).toBe(true)
+    const manifest = JSON.parse(await fs.readFile(path.join(repoDir, '.image-studio-files.json'), 'utf8'))
+    expect(manifest['a.gguf']).toEqual({ size: 10, sha256: sha256(a), revision: 'main' })
+    expect(manifest['b.gguf']).toEqual({ size: 10, sha256: sha256(b), revision: 'main' })
+  })
+
+  it('skips small unhashed files only for the same revision', async () => {
+    const body = Buffer.from('v1')
+    const repoDir = path.join(dir, 'owner', 'repo')
+    const dest = path.join(repoDir, 'info.json')
+    await fs.mkdir(repoDir, { recursive: true })
+    await fs.writeFile(dest, body)
+    await fs.writeFile(path.join(repoDir, '.image-studio-files.json'), JSON.stringify({
+      'info.json': { size: 2, revision: 'main' }
+    }))
+    const { fetchImpl, calls } = repoFetch({ 'info.json': Buffer.from('v2') })
+    const mgr = makeManager(fetchImpl, dir)
+    const done = await mgr.whenDone(
+      mgr.enqueue({ repo: 'owner/repo', files: ['info.json'], expected: [{ path: 'info.json', size: 2 }] })
+    )
+    expect(done.state).toBe('done')
+    expect(calls).toHaveLength(0)
+    expect((await fs.readFile(dest)).equals(body)).toBe(true)
+
+    // A different revision re-downloads and re-verifies.
+    await fs.writeFile(path.join(repoDir, '.image-studio-files.json'), JSON.stringify({
+      'info.json': { size: 2, revision: 'deadbeef' }
+    }))
+    const { fetchImpl: fetch2, calls: calls2 } = repoFetch({ 'info.json': Buffer.from('v2') })
+    const mgr2 = makeManager(fetch2, dir)
+    const done2 = await mgr2.whenDone(
+      mgr2.enqueue({ repo: 'owner/repo', files: ['info.json'], expected: [{ path: 'info.json', size: 2 }] })
+    )
+    expect(done2.state).toBe('done')
+    expect(calls2).toHaveLength(1)
+    expect((await fs.readFile(dest)).equals(Buffer.from('v2'))).toBe(true)
+  })
+
+  it('records verified files in the manifest across parallel workers', async () => {
+    const bodies = {
+      'a.gguf': Buffer.from('A'.repeat(100)),
+      'b.gguf': Buffer.from('B'.repeat(120)),
+      'sub/c.gguf': Buffer.from('C'.repeat(80))
+    }
+    const expected = Object.entries(bodies).map(([p, buf]) => ({ path: p, size: buf.length, sha256: sha256(buf) }))
+    const { fetchImpl } = repoFetch(bodies)
+    const mgr = makeManager(fetchImpl, dir)
+    const done = await mgr.whenDone(mgr.enqueue({ repo: 'owner/repo', files: Object.keys(bodies), expected }))
+    expect(done.state).toBe('done')
+    const repoDir = path.join(dir, 'owner', 'repo')
+    const manifest = JSON.parse(await fs.readFile(path.join(repoDir, '.image-studio-files.json'), 'utf8'))
+    for (const [p, buf] of Object.entries(bodies)) {
+      expect(manifest[p]).toEqual({ size: buf.length, sha256: sha256(buf), revision: 'main' })
+    }
+    // Atomic writes leave no temp files behind.
+    expect((await fs.readdir(repoDir)).filter((f) => f.endsWith('.tmp'))).toEqual([])
   })
 
   it('resumes from a .part file via 206 and still verifies the hash', async () => {
@@ -331,6 +419,9 @@ describe('DownloadManager', () => {
     await fs.writeFile(path.join(repoDir, 'model.gguf'), Buffer.alloc(10))
     await fs.writeFile(path.join(repoDir, 'sub', 'model-00001-of-00002.gguf'), Buffer.alloc(5))
     await fs.writeFile(path.join(repoDir, 'model.gguf.part'), Buffer.alloc(3))
+    await fs.writeFile(path.join(repoDir, '.image-studio-files.json'), '{}')
+    await fs.mkdir(path.join(repoDir, '.cache'), { recursive: true })
+    await fs.writeFile(path.join(repoDir, '.cache', 'junk.gguf'), Buffer.alloc(2))
     await fs.writeFile(path.join(dir, 'owner', 'other', 'model_index.json'), '')
     const mgr = makeManager(repoFetch({}).fetchImpl, dir)
     const repos = await mgr.scanLocal()

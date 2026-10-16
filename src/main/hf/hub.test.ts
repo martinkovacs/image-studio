@@ -143,7 +143,7 @@ describe('getRepoDetails', () => {
       'model-Q4_K_M.gguf'
     ])
     expect(d.files[0].sha256).toBe('e'.repeat(64))
-    expect(d.quants.map((g) => [g.quant, g.totalBytes])).toEqual([['Q4_K_M', 20], ['Q8_0', 20]])
+    expect(d.quants.map((g) => [g.quant, g.totalBytes])).toEqual([['Q4_K_M', 10], ['Q8_0', 20]])
     expect(d.totalBytes).toBe(43)
     expect(d.license).toBe('cc-by-nc-4.0')
     expect(d.pipelineTag).toBe('text-to-image')

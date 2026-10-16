@@ -52,6 +52,57 @@ interface DownloadRecord {
 
 const PROGRESS_MIN_MS = 250
 
+/**
+ * Per-repo manifest of files verified on disk, e.g.
+ * `<localDir>/.image-studio-files.json` = `{ [repoPath]: { size, sha256?, revision } }`.
+ * Files all revisions share one folder, so a size match alone is not enough to
+ * skip a download: the manifest vouches for which exact bytes are in place.
+ */
+const MANIFEST_NAME = '.image-studio-files.json'
+
+interface ManifestEntry {
+  /** Size of the verified file in bytes. */
+  size: number
+  /** sha256 of the content, when known. */
+  sha256?: string
+  /** Repo revision (commit) the file was fetched from. */
+  revision: string
+}
+
+type FilesManifest = Record<string, ManifestEntry>
+
+// Manifest writes are serialized per repo so parallel workers never clobber entries.
+const manifestLocks = new Map<string, Promise<void>>()
+
+function manifestPath(repoDir: string): string {
+  return path.join(repoDir, MANIFEST_NAME)
+}
+
+/** Reads a repo's manifest; {} when missing or unreadable. */
+async function readManifest(repoDir: string): Promise<FilesManifest> {
+  try {
+    const parsed: unknown = JSON.parse(await fs.readFile(manifestPath(repoDir), 'utf8'))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as FilesManifest) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Atomically merges one verified file entry into the repo's manifest (tmp + rename). */
+async function recordVerified(repoDir: string, repoPath: string, entry: ManifestEntry): Promise<void> {
+  const file = manifestPath(path.resolve(repoDir))
+  const prev = manifestLocks.get(file) ?? Promise.resolve()
+  const run = prev.catch(() => undefined).then(async () => {
+    const manifest = await readManifest(repoDir)
+    manifest[repoPath] = entry
+    const tmp = `${file}.${randomUUID()}.tmp`
+    await fs.writeFile(tmp, JSON.stringify(manifest))
+    await fs.rename(tmp, file)
+  })
+  manifestLocks.set(file, run.then(() => undefined, () => undefined))
+  await run
+}
+
 export class DownloadManager extends EventEmitter {
   private readonly modelsDir: () => string
   private readonly token: () => string | null
@@ -265,12 +316,20 @@ export class DownloadManager extends EventEmitter {
     rec.file = meta.path
     this.emitProgress(rec)
 
-    // Already complete at the expected size? Skip without re-hashing multi-GB files.
+    // Skip only files the manifest vouches for: same sha256 (or same revision
+    // when no reference hash is known) and size — never re-hash multi-GB files.
+    const repoDir = this.localDir(rec.repo)
+    const entry = (await readManifest(repoDir))[meta.path]
     if (meta.size > 0 && (await fileSize(dest)) === meta.size) {
-      rec.filesDone++
-      rec.bytesBase += meta.size
-      this.emitProgress(rec)
-      return
+      const verified = meta.sha256
+        ? entry?.sha256?.toLowerCase() === meta.sha256.toLowerCase()
+        : entry?.revision === rec.revision
+      if (verified) {
+        rec.filesDone++
+        rec.bytesBase += meta.size
+        this.emitProgress(rec)
+        return
+      }
     }
 
     await fs.mkdir(path.dirname(dest), { recursive: true })
@@ -333,6 +392,7 @@ export class DownloadManager extends EventEmitter {
       throw new Error(`Checksum mismatch for ${meta.path} — the file was corrupted in transit, delete and retry`)
     }
     await fs.rename(partPath, dest)
+    await recordVerified(repoDir, meta.path, { size: fileBytes, sha256: digest, revision: rec.revision })
     rec.filesDone++
     rec.bytesBase += fileBytes
     this.emitProgress(rec)
@@ -355,6 +415,8 @@ export class DownloadManager extends EventEmitter {
     }
     const out: HfLocalFile[] = []
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      // Hidden entries include the verified-files manifest and its tmp files.
+      if (entry.name.startsWith('.')) continue
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name
       if (entry.isDirectory()) {
         out.push(...(await this.walkRepoDir(dir, rel)))

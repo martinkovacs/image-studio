@@ -87,7 +87,7 @@ describe('groupQuants', () => {
     const files = [
       { path: 'mmproj-F16.gguf', size: 100 },
       { path: 'model-Q8_0.gguf', size: 800 },
-      { path: 'model-Q4_K_M.gguf', size: 480 },
+      { path: 'model-Q4_K_M.gguf', size: 480, sha256: 'b'.repeat(64) },
       { path: 'model-Q4_K_M-00001-of-00002.gguf', size: 300, sha256: 'a'.repeat(64) },
       { path: 'model-Q4_K_M-00002-of-00002.gguf', size: 180 },
       { path: 'config.json', size: 5 },
@@ -96,14 +96,41 @@ describe('groupQuants', () => {
     const groups = groupQuants(files)
     expect(groups.map((g) => [g.stem, g.quant, g.totalBytes])).toEqual([
       ['mmproj', 'F16', 100],
-      ['model', 'Q4_K_M', 960],
+      ['model', 'Q4_K_M', 480],
       ['model', 'Q8_0', 800],
       ['model', '', 999]
     ])
-    expect(groups[1].files).toHaveLength(3)
-    expect(groups[1].files[1].sha256).toBe('a'.repeat(64))
+    // The single complete file wins over the shard set of the same weights.
+    expect(groups[1].files).toEqual([{ path: 'model-Q4_K_M.gguf', size: 480, sha256: 'b'.repeat(64) }])
     expect(groups[0].bits).toBe(16)
     expect(groups[3].bits).toBeNull()
+  })
+
+  it('keeps the fewest-shard complete shard set when there is no single file', () => {
+    const files = [
+      { path: 'model-Q4_K_M-00001-of-00003.gguf', size: 220 },
+      { path: 'model-Q4_K_M-00002-of-00003.gguf', size: 220 },
+      { path: 'model-Q4_K_M-00003-of-00003.gguf', size: 60 },
+      { path: 'model-Q4_K_M-00001-of-00002.gguf', size: 300 },
+      { path: 'model-Q4_K_M-00002-of-00002.gguf', size: 200 }
+    ]
+    const groups = groupQuants(files)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].files.map((f) => f.path)).toEqual([
+      'model-Q4_K_M-00001-of-00002.gguf',
+      'model-Q4_K_M-00002-of-00002.gguf'
+    ])
+    expect(groups[0].totalBytes).toBe(500)
+  })
+
+  it('drops incomplete shard sets', () => {
+    const files = [
+      { path: 'model-Q4_K_M-00001-of-00003.gguf', size: 220 }, // missing shards 2 and 3
+      { path: 'model-Q6_K-00002-of-00002.gguf', size: 100 }, // missing shard 1
+      { path: 'model-Q6_K-00003-of-00003.gguf', size: 90 } // incomplete set of 3
+    ]
+    const groups = groupQuants(files)
+    expect(groups).toEqual([])
   })
 })
 
