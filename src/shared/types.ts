@@ -99,6 +99,8 @@ export interface BackendInfo {
 export interface DiffusersRuntimeInfo {
   supported: boolean
   installed: boolean
+  /** True while an install or removal runs in the main process (survives page remounts). */
+  busy?: boolean
   /** True when installed but resources/diffusers/requirements.txt changed since. */
   outdated: boolean
   pythonPath: string | null
