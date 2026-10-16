@@ -24,6 +24,7 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -181,14 +182,17 @@ class BuildCallKwargsTest(unittest.TestCase):
         self.assertNotIn('true_cfg_scale', kwargs)
         self.assertNotIn('negative_prompt', kwargs)
 
-    def test_klein_passes_no_cfg_kwarg(self):
+    def test_klein_pins_guidance_scale_to_one(self):
         kwargs = self.build('Flux2KleinPipeline', {
             'prompt': 'a cat',
-            'sample_params': {'sample_steps': 4, 'guidance': {'txt_cfg': 1.0}},
+            'sample_params': {'sample_steps': 4, 'guidance': {'txt_cfg': 4.0}},
         })
         self.assertEqual(kwargs['num_inference_steps'], 4)
         self.assertNotIn('true_cfg_scale', kwargs)
-        self.assertNotIn('guidance_scale', kwargs)
+        # FLUX.2 klein's CFG turns on whenever guidance_scale > 1 (the repo
+        # config lacks is_distilled=true, class default 4.0), so it is pinned
+        # to 1.0 regardless of the request.
+        self.assertEqual(kwargs['guidance_scale'], 1.0)
 
     def test_sigmas_with_trailing_zero_terminator_are_trimmed(self):
         # sd.cpp turbo preset: steps + 1 entries ending in 0.0 → drop the zero.
@@ -364,6 +368,64 @@ class FakeEngine:
         on_step(1, 2, 0.5)
         on_step(2, 2, 0.5)
         return [bytes(PNG_1PX)]
+
+
+class WorkerSurvivesEscapingExceptionsTest(unittest.TestCase):
+    """The worker's catch-all: even failing error logging must not kill it.
+
+    An exception escaping _execute (e.g. from inside its except/finally
+    handlers) would leave the job stuck in 'generating' and queue every later
+    job forever, so _worker_loop marks the job failed and keeps running.
+    """
+
+    def wait_until(self, predicate, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_job_fails_and_loop_survives_when_logging_raises(self):
+        raised = threading.Event()
+
+        class FailOnceEngine(FakeEngine):
+            """Raises on the first generate() call, succeeds afterwards."""
+
+            def generate(self, kwargs, on_step, should_cancel):
+                if not raised.is_set():
+                    raised.set()
+                    self.calls.append(dict(kwargs))
+                    self.started.set()
+                    while not self.release.is_set():
+                        if should_cancel():
+                            return []
+                        time.sleep(0.005)
+                    raise RuntimeError('engine exploded')
+                return super().generate(kwargs, on_step, should_cancel)
+
+        engine = FailOnceEngine()
+        engine.release.set()  # the failing generate() raises immediately
+        queue = server.JobQueue(engine, job_ttl=60.0)
+        queue.start()
+        self.addCleanup(queue.stop)
+
+        def exploding_traceback() -> None:
+            raise RuntimeError('traceback logging exploded')
+
+        with mock.patch.object(server, 'log_traceback', exploding_traceback):
+            queue.submit(server.Job(id='bad', kwargs={'prompt': 'bad'}))
+            queue.submit(server.Job(id='good', kwargs={'prompt': 'good'}))
+            # The follow-up job must still complete: the worker loop survived.
+            self.assertTrue(
+                self.wait_until(lambda: (queue.get('good') or {}).get('status') == server.COMPLETED)
+            )
+        snapshot = queue.get('bad')
+        self.assertEqual(snapshot['status'], server.FAILED)
+        self.assertIn('internal error:', snapshot['error']['message'])
+        self.assertIn('traceback logging exploded', snapshot['error']['message'])
+        # finished_at was set even though _execute's own finally was bypassed.
+        self.assertIsNotNone(queue._jobs['bad'].finished_at)
 
 
 class JobQueueCancelRaceTest(unittest.TestCase):
@@ -582,7 +644,9 @@ class HttpServerTest(unittest.TestCase):
         self.assertRegex(submitted['id'], r'^[0-9a-f]{32}$')
 
         job = self.wait_for(port, submitted['id'], 'completed')
-        self.assertEqual(job['queue_position'], 0)
+        # queue_position is only present while queued: the Node client treats
+        # a numeric value as "still waiting in queue".
+        self.assertNotIn('queue_position', job)
         self.assertIsNone(job['error'])
         result = job['result']
         self.assertEqual(result['output_format'], 'png')
@@ -601,6 +665,23 @@ class HttpServerTest(unittest.TestCase):
         _, port = self.start_server(engine)
         status, _ = self.submit(port, {'prompt': 'a cat', 'hires': {'enabled': True}, 'lora': [{'path': 'x'}]})
         self.assertEqual(status, 200)
+
+    def test_queued_jobs_report_one_based_queue_position(self):
+        engine = FakeEngine()  # not released: the first job keeps the worker busy
+        _, port = self.start_server(engine)
+        _, first = self.submit(port, {'prompt': 'first'})
+        self.assertTrue(engine.started.wait(5))
+        _, second = self.submit(port, {'prompt': 'second'})
+        _, third = self.submit(port, {'prompt': 'third'})
+        _, second_job = self.request(port, 'GET', f"/sdcpp/v1/jobs/{second['id']}")
+        self.assertEqual(second_job['status'], 'queued')
+        self.assertEqual(second_job['queue_position'], 1)
+        _, third_job = self.request(port, 'GET', f"/sdcpp/v1/jobs/{third['id']}")
+        self.assertEqual(third_job['queue_position'], 2)
+        # A generating/completed job must not carry a queue_position at all.
+        _, first_job = self.request(port, 'GET', f"/sdcpp/v1/jobs/{first['id']}")
+        self.assertEqual(first_job['status'], 'generating')
+        self.assertNotIn('queue_position', first_job)
 
     # -- cancellation -----------------------------------------------------------
 
@@ -684,6 +765,18 @@ class HttpServerTest(unittest.TestCase):
         _, port = self.start_server(FakeEngine())
         status, _ = self.submit(port, {'prompt': 'a cat', 'ref_images': ['not-a-data-url']})
         self.assertEqual(status, 400)
+
+    def test_400_img2img_and_inpaint_fields_rejected(self):
+        _, port = self.start_server(FakeEngine())
+        message = 'The diffusers backend does not support img2img or inpainting — use reference images to edit'
+        for field in ('init_image', 'mask_image', 'control_image'):
+            with self.subTest(field=field):
+                status, payload = self.submit(port, {'prompt': 'a cat', field: 'data:image/png;base64,AAAA'})
+                self.assertEqual(status, 400)
+                self.assertEqual(payload['error'], message)
+        # Empty / absent values are ignored (the client sends '' for unused fields).
+        status, _ = self.submit(port, {'prompt': 'a cat', 'init_image': '', 'mask_image': None})
+        self.assertEqual(status, 200)
 
     def test_400_too_many_ref_images(self):
         _, port = self.start_server(FakeEngine())

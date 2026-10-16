@@ -78,10 +78,10 @@ ALLOWED_LIBRARIES = frozenset({'diffusers', 'transformers'})
 # Pipeline allow-list
 #
 # The only diffusers classes this server may ever instantiate. `cfg_kwarg` is
-# the classifier-free-guidance keyword of the pipeline __call__ (None for
-# distilled pipelines that ignore guidance); `supports` lists the request
-# fields the pipeline honours (surfaced via capabilities so the UI can hide
-# controls).
+# the classifier-free-guidance keyword of the pipeline __call__ (None when
+# there is no user-facing cfg kwarg; see `fixed_kwargs`); `supports` lists the
+# request fields the pipeline honours (surfaced via capabilities so the UI can
+# hide controls).
 
 
 @dataclass(frozen=True)
@@ -95,6 +95,10 @@ class PipelineSpec:
     default_steps: int
     default_cfg: float
     supports: tuple[str, ...]
+    # Extra __call__ kwargs always passed verbatim. FLUX.2 klein's CFG turns
+    # on whenever guidance_scale > 1 while its repo config lacks
+    # is_distilled=true (and the class default is 4.0), so it must be pinned.
+    fixed_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
 
 PIPELINES: dict[str, PipelineSpec] = {
@@ -106,6 +110,7 @@ PIPELINES: dict[str, PipelineSpec] = {
         default_steps=40,
         default_cfg=1.0,
         supports=('negative_prompt', 'txt_cfg', 'ref_images', 'custom_sigmas', 'steps', 'seed', 'batch_count'),
+        fixed_kwargs={},
     ),
     'Flux2Pipeline': PipelineSpec(
         name='Flux2Pipeline',
@@ -115,15 +120,19 @@ PIPELINES: dict[str, PipelineSpec] = {
         default_steps=28,
         default_cfg=4.0,
         supports=('txt_cfg', 'ref_images', 'custom_sigmas', 'steps', 'seed', 'batch_count'),
+        fixed_kwargs={},
     ),
     'Flux2KleinPipeline': PipelineSpec(
         name='Flux2KleinPipeline',
         transformer_cls='Flux2Transformer2DModel',
-        cfg_kwarg=None,  # distilled: guidance is ignored, never passed
+        cfg_kwarg=None,  # no user-facing cfg; pinned via fixed_kwargs below
         negative_prompt=False,
         default_steps=4,
         default_cfg=1.0,
         supports=('ref_images', 'custom_sigmas', 'steps', 'seed', 'batch_count'),
+        # Distilled, but its CFG activates whenever guidance_scale > 1 (the
+        # repo config lacks is_distilled=true) and the class default is 4.0.
+        fixed_kwargs={'guidance_scale': 1.0},
     ),
 }
 
@@ -150,8 +159,38 @@ class QueueFullError(Exception):
 
 
 def log(message: str) -> None:
-    """Human log line on stdout (the app shows these in its server log)."""
-    print(message, flush=True)
+    """Human log line on stdout (the app shows these in its server log).
+
+    Never raises on UnicodeEncodeError: a non-UTF-8 console gets replacement
+    characters, so a log line can never take a thread down.
+    """
+    try:
+        print(message, flush=True)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+        _safe_write(sys.stdout, message.encode(encoding, 'replace').decode(encoding, 'replace') + '\n')
+
+
+def _safe_write(stream: Any, text: str) -> None:
+    """Write to a stream, swallowing encoding and I/O errors (logging must never raise)."""
+    try:
+        stream.write(text)
+        stream.flush()
+    except (OSError, ValueError, UnicodeError):
+        pass
+
+
+def log_traceback() -> None:
+    """Print the active exception's traceback to stderr; never raises.
+
+    Used on failure paths: logging that itself crashes would take the worker
+    thread down and strand the job (and the whole queue) forever.
+    """
+    try:
+        text = traceback.format_exc() or ''
+    except BaseException:
+        return
+    _safe_write(sys.stderr, text)
 
 
 def format_progress_line(step: int, total: int, seconds_per_iter: float) -> str:
@@ -328,6 +367,10 @@ def build_call_kwargs(
         cfg = _coerce_float(cfg_default if cfg_raw is None else cfg_raw, 'sample_params.guidance.txt_cfg')
         kwargs[spec.cfg_kwarg] = max(0.0, min(MAX_CFG, cfg))
 
+    # Pipeline-pinned kwargs (e.g. klein's guidance_scale=1.0) win over the
+    # request-derived values above.
+    kwargs.update(spec.fixed_kwargs)
+
     sigmas_raw = sample.get('custom_sigmas')
     if sigmas_raw is not None:
         if not isinstance(sigmas_raw, list) or not sigmas_raw:
@@ -466,14 +509,20 @@ class Job:
     finished_at: float | None = None
 
     def snapshot(self, queue_position: int) -> dict[str, Any]:
-        """The JSON shape the client's poll loop expects (JobJson in server.ts)."""
-        return {
+        """The JSON shape the client's poll loop expects (JobJson in server.ts).
+
+        ``queue_position`` (1-based) is only present while QUEUED: the Node
+        client treats any numeric value as "still waiting in queue".
+        """
+        snapshot: dict[str, Any] = {
             'id': self.id,
             'status': self.status,
-            'queue_position': queue_position,
             'result': self.result,
             'error': {'message': self.error} if self.status == FAILED and self.error else None,
         }
+        if self.status == QUEUED:
+            snapshot['queue_position'] = queue_position
+        return snapshot
 
 
 def job_error_message(err: BaseException) -> str:
@@ -559,7 +608,8 @@ class JobQueue:
                 return None
             position = 0
             if job.status == QUEUED:
-                position = next((i for i, j in enumerate(self._pending) if j is job), 0)
+                # 1-based: the client shows "waiting in queue: N".
+                position = next((i for i, j in enumerate(self._pending) if j is job), 0) + 1
             return job.snapshot(position)
 
     def cancel(self, job_id: str) -> str | None:
@@ -596,7 +646,23 @@ class JobQueue:
                     self._wake.clear()
                 self._sweep()
                 continue
-            self._execute(job)
+            try:
+                self._execute(job)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as err:
+                # _execute's own handlers must never take the worker down: an
+                # escaping exception would strand this job in 'generating' and
+                # queue every later job forever.
+                try:
+                    log_traceback()
+                except BaseException:
+                    pass  # even the error log crashing must not kill the loop
+                with self._lock:
+                    if job.status not in _TERMINAL:
+                        job.status = FAILED
+                        job.error = f'internal error: {type(err).__name__}: {err}'
+                    job.finished_at = time.monotonic()
 
     def _take_next(self) -> Job | None:
         """Pop the next runnable job and mark it GENERATING under one lock.
@@ -645,7 +711,7 @@ class JobQueue:
                     job.status = COMPLETED
                 log(f'generated in {time.perf_counter() - started:.2f}s')
         except Exception as err:
-            traceback.print_exc()
+            log_traceback()
             with self._lock:
                 if job.cancel_event.is_set():
                     job.status = CANCELLED
@@ -939,6 +1005,9 @@ class DiffusersEngine:
                 on_step(done, total, (time.perf_counter() - started) / done)
             return callback_kwargs
 
+        # Defensive: a previously cancelled run may have left _interrupt set,
+        # which would make this call bail out after a single step.
+        self._pipe._interrupt = False
         with torch.inference_mode():
             output = self._pipe(generator=generator, callback_on_step_end=callback, **call)
         return list(getattr(output, 'images', None) or [])
@@ -1082,7 +1151,7 @@ class SdRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception:
-            traceback.print_exc()
+            log_traceback()
             self._send_json(500, {'error': 'internal server error'})
         finally:
             self._drain_or_close()
@@ -1130,6 +1199,14 @@ class SdRequestHandler(BaseHTTPRequestHandler):
     def _handle_img_gen(self, state: ServerState) -> None:
         try:
             raw = self._read_json_body()
+            # img2img/inpainting are txt2img-only here; empty values (what the
+            # client sends for unused fields) are ignored.
+            for mode_field in ('init_image', 'mask_image', 'control_image'):
+                if raw.get(mode_field):
+                    raise ClientError(
+                        400,
+                        'The diffusers backend does not support img2img or inpainting — use reference images to edit',
+                    )
             kwargs = build_call_kwargs(state.engine.spec, raw, state.engine.defaults)
             ref_images = decode_ref_images(raw)
             output_format, compression = parse_output_options(raw)
@@ -1199,6 +1276,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    # The app parses stdout/stderr as UTF-8 (progress regexes, log lines); a
+    # C-locale console would otherwise raise UnicodeEncodeError mid-run. Not
+    # at import time so importing the module (the tests) has no side effects.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
     args = parse_args(argv)
     spec = PIPELINES[args.pipeline]
     try:
