@@ -135,6 +135,13 @@ export function effectiveLocalParams(s: Pick<State, 'caps' | 'localParams'>): Sd
 }
 
 /** Recommended per-generation settings when the active profile came from the supported-model catalog. */
+/** Recipe defaults of the active catalog profile, before its model is loaded (no caps yet). */
+function pendingCatalogDefaults(s: Pick<State, 'settings'>): SdImgGenBody {
+  const profile = activeProfile(s)
+  if (!profile?.catalogId) return {}
+  return CATALOG_BY_ID.get(profile.catalogId)?.recipes[profileBackend(profile)]?.defaults ?? {}
+}
+
 function catalogDefaults(s: Pick<State, 'settings' | 'serverStatus'>, caps: SdCapabilities): SdImgGenBody | null {
   const profile = activeProfile(s)
   if (!profile?.catalogId) return null
@@ -364,7 +371,9 @@ export const useStore = create<Store>((set, get) => ({
         return null
       }
       // Send only user overrides; server-side defaults fill the rest for whichever model is loaded.
-      req.local = s.localParams
+      // Not loaded yet: this request starts the server, so it can't wait for
+      // refreshCaps() to seed the catalog defaults — apply them here.
+      req.local = s.caps ? s.localParams : mergeBody(pendingCatalogDefaults(s), s.localParams)
     }
 
     const jobId = uid()

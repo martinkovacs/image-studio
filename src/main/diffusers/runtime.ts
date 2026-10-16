@@ -225,6 +225,12 @@ export interface InstallRuntimeOptions {
   renameImpl?: (from: string, to: string) => Promise<void>
   /** Test hook replacing the embedded pinned checksums. */
   uvChecksums?: Record<string, string>
+  /**
+   * Runs once the operation lock is held, before anything is touched (the app
+   * stops a running diffusers server here). Launches check the lock right
+   * before spawning, so after this resolves no server can start from the venv.
+   */
+  afterLock?: () => Promise<void>
 }
 
 /** One install or removal at a time, module-wide (they must not race). */
@@ -245,6 +251,7 @@ export async function installRuntimeCore(opts: InstallRuntimeOptions): Promise<R
   if (operationInFlight === 'remove') throw new Error('A removal is running — wait for it to finish.')
   operationInFlight = 'install'
   try {
+    await opts.afterLock?.()
     return await doInstall(opts)
   } finally {
     operationInFlight = null
@@ -509,7 +516,8 @@ export async function runtimeInfo(
 /** Removes the managed runtime dir; refuses anything not named diffusers-runtime. */
 export async function removeRuntime(
   root: string,
-  removeImpl: (p: string, opts: { recursive: boolean; force: boolean }) => Promise<void> = fs.rm
+  removeImpl: (p: string, opts: { recursive: boolean; force: boolean }) => Promise<void> = fs.rm,
+  afterLock?: () => Promise<void>
 ): Promise<void> {
   if (!root.endsWith('diffusers-runtime')) {
     throw new Error(`Refusing to remove "${root}": not the diffusers runtime directory.`)
@@ -518,6 +526,7 @@ export async function removeRuntime(
   if (operationInFlight === 'remove') throw new Error('A removal is already running.')
   operationInFlight = 'remove'
   try {
+    await afterLock?.()
     await removeImpl(root, { recursive: true, force: true })
   } finally {
     operationInFlight = null
@@ -581,9 +590,10 @@ export function getRuntimeInfo(): Promise<DiffusersRuntimeInfo> {
 }
 
 /** Full install, streaming RuntimeInstallProgress; only one install at a time. */
-export async function installRuntime(onProgress: (p: RuntimeInstallProgress) => void): Promise<void> {
+export async function installRuntime(onProgress: (p: RuntimeInstallProgress) => void, afterLock?: () => Promise<void>): Promise<void> {
   try {
     await installRuntimeCore({
+      afterLock,
       root: runtimeRoot(),
       requirementsPath: requirementsFile(),
       platform: process.platform,
@@ -598,8 +608,8 @@ export async function installRuntime(onProgress: (p: RuntimeInstallProgress) => 
   }
 }
 
-export function uninstallRuntime(): Promise<void> {
-  return removeRuntime(runtimeRoot())
+export function uninstallRuntime(afterLock?: () => Promise<void>): Promise<void> {
+  return removeRuntime(runtimeRoot(), fs.rm, afterLock)
 }
 
 /** Python executable of the managed runtime, or null when not installed. */

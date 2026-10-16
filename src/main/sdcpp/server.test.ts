@@ -357,6 +357,20 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
     expect((call.opts.env as NodeJS.ProcessEnv).PATH?.split(path.delimiter)[0]).toBe(path.dirname(fakeScript))
   }, 10_000)
 
+  it('refuses to spawn when the launch preflight throws (runtime being replaced)', async () => {
+    const server = newServer({ readyTimeoutMs: 5000 })
+    const launch: LaunchSpec = {
+      ...launchFor('p1'),
+      preflight: () => {
+        throw new Error('The diffusers runtime is being installed or removed — wait for it to finish')
+      }
+    }
+    const st = await server.start(profile('p1'), launch, await freePort())
+    expect(st.state).toBe('error')
+    expect(st.error).toMatch(/being installed or removed/)
+    expect(spawned).toHaveLength(0)
+  })
+
   it('reports a clear error when a required launch file is missing', async () => {
     const server = newServer({ readyTimeoutMs: 5000 })
     const launch: LaunchSpec = {

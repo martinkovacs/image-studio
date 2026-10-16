@@ -95,7 +95,16 @@ async function resolveLaunch(settings: AppSettings, profile: LocalModelProfile):
     if (runtimeBusy()) throw new Error('The diffusers runtime is being installed or removed — wait for it to finish')
     const pythonPath = await runtimePythonPath()
     if (!pythonPath) throw new Error('The diffusers runtime is not installed — install it in Settings → Local engine')
-    return diffusersLaunch({ pythonPath, scriptPath: serverScript(), profile, hfHome: join(runtimeRoot(), 'hf-home') })
+    return diffusersLaunch({
+      pythonPath,
+      scriptPath: serverScript(),
+      profile,
+      hfHome: join(runtimeRoot(), 'hf-home'),
+      // Re-checked right before spawn: an install/removal may have taken the lock since.
+      preflight: () => {
+        if (runtimeBusy()) throw new Error('The diffusers runtime is being installed or removed — wait for it to finish')
+      }
+    })
   }
   const serverPath = await resolveServerPath(settings)
   if (!serverPath) throw new Error('No stable-diffusion.cpp engine installed — install one in Settings → Local engine')
@@ -217,13 +226,13 @@ function registerIpc(): void {
   ipcMain.handle('diffusers:install', async () => {
     requireLocal()
     // The venv is replaced in place; a running diffusers server holds files open in it.
-    if (server.status().state !== 'stopped') await server.stop()
-    return installRuntime((p: RuntimeInstallProgress) => send('diffusers:progress', p))
+    // Stop only once the lock is held: stop() wins over an in-flight start, and
+    // later starts fail the launch preflight.
+    return installRuntime((p: RuntimeInstallProgress) => send('diffusers:progress', p), () => server.stop().then(() => undefined))
   })
   ipcMain.handle('diffusers:remove', async () => {
     requireLocal()
-    if (server.status().state !== 'stopped') await server.stop()
-    return uninstallRuntime()
+    return uninstallRuntime(() => server.stop().then(() => undefined))
   })
 
   ipcMain.handle('hf:setToken', (_e, token) => {

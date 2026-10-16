@@ -323,6 +323,19 @@ describe('DownloadManager', () => {
     await expect(fs.stat(`${dest}.part`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('never resumes an unhashed file (its .part may come from another revision)', async () => {
+    const body = Buffer.from('{"new": "config"}')
+    const dest = path.join(dir, 'owner', 'repo', 'config.json')
+    await fs.mkdir(path.dirname(dest), { recursive: true })
+    await fs.writeFile(`${dest}.part`, Buffer.from('{"old"'))
+    const { fetchImpl, calls } = repoFetch({ 'config.json': body })
+    const mgr = makeManager(fetchImpl, dir)
+    const done = await mgr.whenDone(mgr.enqueue({ repo: 'owner/repo', files: ['config.json'], expected: [{ path: 'config.json', size: body.length }] }))
+    expect(done.state).toBe('done')
+    expect(calls.every((c) => !c.headers.range)).toBe(true)
+    expect((await fs.readFile(dest)).equals(body)).toBe(true)
+  })
+
   it('restarts from zero when the server answers 200 despite Range', async () => {
     const body = Buffer.from('X'.repeat(1000))
     const dest = path.join(dir, 'owner', 'repo', 'm.gguf')

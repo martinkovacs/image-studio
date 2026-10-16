@@ -452,6 +452,12 @@ export class SdServer extends EventEmitter {
 
     let child: ChildProcess
     try {
+      // Synchronous with the spawn below: nothing can slip in between.
+      launch.preflight?.()
+    } catch (err) {
+      return this.setStatus('error', err instanceof Error ? err.message : String(err))
+    }
+    try {
       child = this.spawnImpl(launch.command, launch.argsFor(chosen), {
         cwd: launch.cwd,
         env: { ...process.env, ...launch.env },

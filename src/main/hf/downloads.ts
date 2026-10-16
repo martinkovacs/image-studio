@@ -357,6 +357,13 @@ export class DownloadManager extends EventEmitter {
     await fs.mkdir(path.dirname(dest), { recursive: true })
     const partPath = `${dest}.part`
     let partSize = await fileSize(partPath)
+    // Only hashed (LFS) files may resume: the final sha256 proves the part and the
+    // new bytes belong together. A small unhashed file could otherwise splice an
+    // old revision's prefix onto a new one, so it always restarts.
+    if (partSize > 0 && !meta.sha256) {
+      await fs.rm(partPath, { force: true })
+      partSize = 0
+    }
 
     // Stall watchdog: aborts the transfer when no bytes arrive for stallTimeoutMs.
     // Linked to the download's controller so a user cancel still aborts the fetch.

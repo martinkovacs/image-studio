@@ -126,6 +126,8 @@ export interface LaunchSpec {
   label: string
   /** Files that must exist before spawning (command, script). */
   requiredFiles: string[]
+  /** Last-moment check run synchronously right before spawning; throw to refuse the launch. */
+  preflight?: () => void
 }
 
 /**
@@ -161,6 +163,7 @@ export function diffusersLaunch(opts: {
   profile: LocalModelProfile
   /** Hugging Face cache home; the server runs with HF_HUB_OFFLINE=1. */
   hfHome: string
+  preflight?: () => void
 }): LaunchSpec {
   const flagArgs = buildFlagArgs(opts.profile.args, DIFFUSERS_FLAG_BY_ID)
   const extraArgs = opts.profile.extraArgs?.trim() ? splitShellArgs(opts.profile.extraArgs) : []
@@ -196,6 +199,7 @@ export function diffusersLaunch(opts: {
       PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True'
     },
     label: 'diffusers server',
-    requiredFiles: [opts.pythonPath, opts.scriptPath]
+    requiredFiles: [opts.pythonPath, opts.scriptPath],
+    ...(opts.preflight ? { preflight: opts.preflight } : {})
   }
 }

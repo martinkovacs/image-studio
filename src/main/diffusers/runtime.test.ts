@@ -400,6 +400,26 @@ describe('removeRuntime', () => {
     await expect(fs.readFile(path.join(dir, 'precious.txt'), 'utf8')).resolves.toBe('keep me')
   })
 
+  it('runs afterLock with the lock held, before deleting anything', async () => {
+    const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rt-remove-'))
+    tmps.push(parent)
+    const dir = path.join(parent, 'diffusers-runtime')
+    await fs.mkdir(dir)
+    const order: string[] = []
+    await removeRuntime(
+      dir,
+      async (p, o) => {
+        order.push('rm')
+        await fs.rm(p, o)
+      },
+      async () => {
+        order.push(runtimeBusy() ? 'afterLock(busy)' : 'afterLock(idle)')
+      }
+    )
+    expect(order).toEqual(['afterLock(busy)', 'rm'])
+    expect(runtimeBusy()).toBe(false)
+  })
+
   it('removes the managed runtime directory', async () => {
     const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rt-remove-'))
     tmps.push(parent)

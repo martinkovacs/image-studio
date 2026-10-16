@@ -177,11 +177,13 @@ export function StudioView() {
 
           <Section title="Images" open={imagesOpen} onToggle={setImagesOpen}>
             <RefImages orModel={model} />
-            {local && advanced && initSupported && (
+            {/* An init image stays visible (with its Remove button) even where it can't be used, so it never blocks generation unseen. */}
+            {local && ((advanced && initSupported) || hasInit) && (
               <div className="flex flex-col gap-3 border-t border-ink-800 pt-3">
                 <span className="label-caps">Init image · img2img / inpaint</span>
+                {!initSupported && <p className="text-[11px] leading-snug text-stop">The loaded model has no img2img — remove the init image, or use it as a reference image instead.</p>}
                 <InitImage />
-                {hasInit && <StrengthField />}
+                {hasInit && initSupported && <StrengthField />}
               </div>
             )}
           </Section>
