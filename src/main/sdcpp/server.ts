@@ -1,5 +1,7 @@
-// Drives the sd-server process: spawn, args, readiness polling, native API
-// calls and progress parsing. Deliberately electron-free so it is unit-testable.
+// Drives a local backend server process (sd-server binary or the Python
+// diffusers server): spawn, readiness polling, native API calls and progress
+// parsing. Deliberately electron-free so it is unit-testable. How a backend is
+// launched (command, argv, env) lives in backends/launch.ts.
 import { EventEmitter } from 'node:events'
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
@@ -8,104 +10,12 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import process from 'node:process'
 import type { LocalModelProfile, ServerStatus, SdCapabilities, SdImgGenBody } from '@shared/types'
-import { FLAG_BY_ID } from '@shared/sdcppFlags'
+import type { LaunchSpec } from '../backends/launch'
 
 // ---------------------------------------------------------------------------
-// Flag building
+// Flag building (shared with the diffusers backend; implemented in backends/launch.ts)
 
-/** Shell-like splitter: single/double quotes and backslash escapes. */
-export function splitShellArgs(input: string): string[] {
-  const tokens: string[] = []
-  let cur = ''
-  let curIsQuoted = false
-  let inSingle = false
-  let inDouble = false
-  const push = () => {
-    if (curIsQuoted || cur.length > 0) tokens.push(cur)
-    cur = ''
-    curIsQuoted = false
-  }
-  const chars = [...input]
-  for (let i = 0; i < chars.length; i++) {
-    const ch = chars[i]
-    if (inSingle) {
-      // Everything is literal inside single quotes; only the quote itself acts.
-      if (ch === "'") inSingle = false
-      else cur += ch
-      continue
-    }
-    if (ch === '\\') {
-      const next = chars[i + 1]
-      if (inDouble) {
-        // Inside double quotes a backslash only escapes `"` or `\`; otherwise both
-        // the backslash and the next character are literal.
-        if (next === '"' || next === '\\') {
-          cur += next
-          i++
-          continue
-        }
-        cur += ch
-        continue
-      }
-      // Outside quotes a backslash only escapes a quote, backslash or whitespace;
-      // anything else stays literal (so `C:\models\a.gguf` survives untouched).
-      const escapable = next === '"' || next === "'" || next === '\\' || next === ' ' || next === '\t' || next === '\n' || next === '\r'
-      if (next !== undefined && escapable) {
-        cur += next
-        if (next === '"' || next === "'") curIsQuoted = true
-        i++
-        continue
-      }
-      cur += ch
-      continue
-    }
-    if (inDouble) {
-      if (ch === '"') inDouble = false
-      else cur += ch
-      continue
-    }
-    if (ch === "'") {
-      inSingle = true
-      curIsQuoted = true
-      continue
-    }
-    if (ch === '"') {
-      inDouble = true
-      curIsQuoted = true
-      continue
-    }
-    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
-      push()
-      continue
-    }
-    cur += ch
-  }
-  if (inSingle || inDouble) throw new Error('unterminated quote in extra args')
-  push()
-  return tokens
-}
-
-/**
- * Builds the sd-server argument vector for a launch profile + listen port.
- * Only known flag ids (see FLAG_BY_ID) are honored: bool true → `--<id>`;
- * bool false / '' / undefined → omitted; other values → `--<id> <value>`.
- */
-export function buildServerArgs(profile: LocalModelProfile, port: number): string[] {
-  const args: string[] = []
-  for (const [id, value] of Object.entries(profile.args)) {
-    if (!FLAG_BY_ID.has(id)) continue // unknown keys are silently ignored
-    if (typeof value === 'boolean') {
-      if (value) args.push(`--${id}`)
-      continue
-    }
-    if (value === undefined || value === '') continue
-    args.push(`--${id}`, String(value))
-  }
-  if (profile.extraArgs?.trim()) args.push(...splitShellArgs(profile.extraArgs))
-  // Last so extra args can't move the server off the loopback port we poll.
-  args.push('--listen-ip', '127.0.0.1', '--listen-port', String(port))
-  return args
-}
+export { splitShellArgs, buildServerArgs } from '../backends/launch'
 
 // ---------------------------------------------------------------------------
 // Progress parsing
@@ -286,7 +196,7 @@ export function listDevices(serverPath: string): Promise<string[]> {
 
 /** Maps sd.cpp log lines to coarse pipeline stages shown in the UI. */
 export function parseStageLine(line: string): 'decoding' | 'hires' | 'sampling' | null {
-  if (/decoding \d+ latents|tiled vae|vae_tiling/i.test(line)) return 'decoding'
+  if (/decoding \d+(?:\/\d+)? latents|tiled vae|vae_tiling/i.test(line)) return 'decoding'
   if (/hires fix: upscaling/i.test(line)) return 'hires'
   if (/generating image: \d+\/\d+/i.test(line)) return 'sampling'
   return null
@@ -444,7 +354,8 @@ export class SdServer extends EventEmitter {
   }
 
   /**
-   * Starts sd-server. Early return if already ready with the same profile.
+   * Starts the backend described by `launch` (sd-server binary or the Python
+   * diffusers server). Early return if already ready with the same profile.
    * Concurrent callers for the same profile share one load instead of
    * restarting it. All starts (and stops) are serialized through a single
    * queue; starting a different profile aborts an in-flight one via the epoch
@@ -455,7 +366,7 @@ export class SdServer extends EventEmitter {
    */
   async start(
     profile: LocalModelProfile,
-    serverPath: string,
+    launch: LaunchSpec,
     port: number,
     opts: { signal?: AbortSignal } = {}
   ): Promise<ServerStatus> {
@@ -471,7 +382,7 @@ export class SdServer extends EventEmitter {
     // Capture the epoch now: if a stop/start supersedes this call while it is
     // still queued, doStart sees the mismatch and never spawns.
     const epoch = ++this.epoch
-    const promise = this.enqueue(() => this.doStart(profile, serverPath, port, epoch))
+    const promise = this.enqueue(() => this.doStart(profile, launch, port, epoch))
     this.inflight = { profileId: profile.id, promise }
     promise.catch(() => {}) // cleanup runs even when nobody listens
     void promise.finally(() => {
@@ -498,7 +409,7 @@ export class SdServer extends EventEmitter {
     return this.status()
   }
 
-  private async doStart(profile: LocalModelProfile, serverPath: string, port: number, epoch: number): Promise<ServerStatus> {
+  private async doStart(profile: LocalModelProfile, launch: LaunchSpec, port: number, epoch: number): Promise<ServerStatus> {
     const aborted = (): boolean => this.epoch !== epoch
     // Superseded while queued: the newer operation owns the process and status.
     if (aborted()) return this.status()
@@ -512,7 +423,9 @@ export class SdServer extends EventEmitter {
     }
     if (aborted()) return this.abortedStartStatus(epoch)
 
-    if (!(await fileExists(serverPath))) return this.setStatus('error', `sd-server not found at ${serverPath}`)
+    for (const file of launch.requiredFiles) {
+      if (!(await fileExists(file))) return this.setStatus('error', `${launch.label} not found at ${file}`)
+    }
     if (aborted()) return this.abortedStartStatus(epoch)
     this.logBuffer.length = 0
     this.stdoutLines = new OutputLineSplitter()
@@ -528,7 +441,7 @@ export class SdServer extends EventEmitter {
       if (aborted()) return this.abortedStartStatus(epoch)
     }
     if (chosen === -1) {
-      return this.setStatus('error', `sd-server could not start: no free port found (probed ${port}–${port + 199}, all busy)`)
+      return this.setStatus('error', `${launch.label} could not start: no free port found (probed ${port}–${port + 199}, all busy)`)
     }
     if (aborted()) return this.abortedStartStatus(epoch)
     if (chosen !== port) this.pushPlainLog(`port ${port} is busy, using ${chosen} instead`)
@@ -537,27 +450,25 @@ export class SdServer extends EventEmitter {
     this.emit('status', { ...this.statusValue })
     if (aborted()) return this.abortedStartStatus(epoch)
 
-    const binDir = path.dirname(serverPath)
-    const env: NodeJS.ProcessEnv = { ...process.env }
-    const sep = process.platform === 'win32' ? ';' : ':'
-    // Freshly extracted builds keep shared libs next to the binary; make sure
-    // the loader finds them (linux mac vulkan / rocm, and cuda-source builds).
-    env.LD_LIBRARY_PATH = [binDir, env.LD_LIBRARY_PATH].filter(Boolean).join(':')
-    env.PATH = [binDir, env.PATH].filter(Boolean).join(sep)
-
     let child: ChildProcess
     try {
-      child = this.spawnImpl(serverPath, buildServerArgs(profile, chosen), {
-        cwd: binDir,
-        env,
+      // Synchronous with the spawn below: nothing can slip in between.
+      launch.preflight?.()
+    } catch (err) {
+      return this.setStatus('error', err instanceof Error ? err.message : String(err))
+    }
+    try {
+      child = this.spawnImpl(launch.command, launch.argsFor(chosen), {
+        cwd: launch.cwd,
+        env: { ...process.env, ...launch.env },
         stdio: ['ignore', 'pipe', 'pipe']
       })
     } catch (err) {
-      return this.setStatus('error', `failed to spawn sd-server: ${String(err)}`)
+      return this.setStatus('error', `failed to spawn ${launch.label}: ${String(err)}`)
     }
     this.child = child
     this.attachChildPipes(child, epoch)
-    this.attachExitHandlers(child, epoch)
+    this.attachExitHandlers(child, epoch, launch.label)
 
     if (aborted()) {
       // We spawned anyway (the epoch changed between checks): kill what we spawned.
@@ -565,7 +476,7 @@ export class SdServer extends EventEmitter {
       return this.abortedStartStatus(epoch)
     }
 
-    const ready = await this.waitReady(chosen, epoch, child)
+    const ready = await this.waitReady(chosen, epoch, child, launch.label)
     if (!ready) return this.status()
 
     this.capsCache = null
@@ -589,14 +500,14 @@ export class SdServer extends EventEmitter {
     })
   }
 
-  private attachExitHandlers(child: ChildProcess, epoch: number): void {
+  private attachExitHandlers(child: ChildProcess, epoch: number, label: string): void {
     const aborted = (): boolean => this.epoch !== epoch
     child.once('error', (err) => {
       if (this.child === child) this.child = null
       if (aborted()) return // intentional stop/replace: the stopping side owns the status
       const last20 = this.logBuffer.slice(-20).join('\n')
       if (this.statusValue.state === 'starting' || this.statusValue.state === 'ready') {
-        this.setStatus('error', `failed to start sd-server: ${err.message}\n--- last log lines ---\n${last20}`)
+        this.setStatus('error', `failed to start ${label}: ${err.message}\n--- last log lines ---\n${last20}`)
       }
     })
     child.once('close', (code, signal) => {
@@ -604,9 +515,9 @@ export class SdServer extends EventEmitter {
       if (aborted()) return
       const detail = `(code ${code ?? 'unknown'}${signal ? `, signal ${signal}` : ''})`
       if (this.statusValue.state === 'ready') {
-        this.setStatus('error', `sd-server crashed ${detail}\n--- last log lines ---\n${this.logBuffer.slice(-20).join('\n')}`)
+        this.setStatus('error', `${label} crashed ${detail}\n--- last log lines ---\n${this.logBuffer.slice(-20).join('\n')}`)
       } else if (this.statusValue.state === 'starting') {
-        this.setStatus('error', `sd-server exited while starting ${detail}\nlast log:\n${this.logBuffer.slice(-20).join('\n')}`)
+        this.setStatus('error', `${label} exited while starting ${detail}\nlast log:\n${this.logBuffer.slice(-20).join('\n')}`)
       }
     })
   }
@@ -621,7 +532,7 @@ export class SdServer extends EventEmitter {
    * Polls GET /sdcpp/v1/capabilities until it answers, the child dies, the
    * epoch changes (someone stopped/replaced this start) or the timeout fires.
    */
-  private async waitReady(port: number, epoch: number, child: ChildProcess): Promise<boolean> {
+  private async waitReady(port: number, epoch: number, child: ChildProcess, label: string): Promise<boolean> {
     const startedAt = Date.now()
     const capsUrl = `http://127.0.0.1:${port}/sdcpp/v1/capabilities`
     while (Date.now() - startedAt < this.readyTimeoutMs) {
@@ -636,7 +547,7 @@ export class SdServer extends EventEmitter {
       await new Promise((r) => setTimeout(r, 500))
     }
     if (this.epoch !== epoch || this.child !== child) return false
-    this.setStatus('error', `timed out after ${Math.round(this.readyTimeoutMs / 1000)}s waiting for /sdcpp/v1/capabilities on port ${port}`)
+    this.setStatus('error', `timed out after ${Math.round(this.readyTimeoutMs / 1000)}s waiting for ${label} to answer /sdcpp/v1/capabilities on port ${port}`)
     // Don't leak the process we timed out on.
     if (this.child === child) this.child = null
     await this.waitExit(child)
@@ -725,7 +636,8 @@ export class SdServer extends EventEmitter {
         if (!r.ok) throw await r.errorMessage()
         const job = r.json as JobJson
         const status = job.status ?? 'unknown'
-        if (typeof job.queue_position === 'number' && opts.onQueued) opts.onQueued(job.queue_position)
+        // Both servers send queue_position while generating too (as 0); it is only a queue update while queued.
+        if (status === 'queued' && typeof job.queue_position === 'number' && opts.onQueued) opts.onQueued(job.queue_position)
         if ((status === 'queued' || status === 'generating') && status !== lastState) {
           lastState = status
           opts.onState?.(status)
@@ -738,7 +650,7 @@ export class SdServer extends EventEmitter {
         if (status === 'completed') {
           if (aborted) throw abortErr()
           const result = job.result
-          if (!result) throw new Error('sd-server reported the job as completed but returned no result')
+          if (!result?.images?.length) throw new Error('the local engine reported the job as completed but returned no images')
           return {
             format: result.output_format ?? 'png',
             images: (result.images ?? []).map((im) => Buffer.from(im.b64_json ?? '', 'base64'))

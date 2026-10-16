@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { KeyRound, Sparkles, Wand2 } from 'lucide-react'
-import { useStore } from '../store'
+import { activeProfile, useStore } from '../store'
+import { profileBackend } from '@shared/types'
 import { Button, Section, Segmented, TextArea } from '../components/ui'
 import { imagesFromTransfer } from '../lib/util'
 import { SLIM } from '../lib/edition'
@@ -76,6 +77,13 @@ export function StudioView() {
   const advanced = settings.studioDetail === 'advanced'
   const model = orModels.find((m) => m.id === orModel)
   const local = provider === 'local'
+  const caps = useStore((s) => s.caps)
+  const diffusers = caps?.backend === 'diffusers'
+  const profile = useStore(activeProfile)
+  // Before capabilities arrive, a diffusers pipeline's support is unknown: hide rather than flash.
+  const capsPending = !caps && !!profile && profileBackend(profile) === 'diffusers'
+  const negSupported = !capsPending && caps?.features_by_mode.img_gen?.negative_prompt !== false
+  const initSupported = !capsPending && caps?.features_by_mode.img_gen?.init_image !== false
   const needsKey = provider === 'openrouter' && !settings.openrouter.hasApiKey
   const capsStem = useStore((s) => s.caps?.model.stem)
 
@@ -152,12 +160,13 @@ export function StudioView() {
               placeholder={refCount ? 'Describe the edit… e.g. "replace the sky with a stormy sunset"' : 'Describe the image…'}
             />
             {local &&
+              negSupported &&
               (showNeg ? (
                 <TextArea
                   rows={2}
                   value={negativePrompt}
                   onChange={(e) => set('negativePrompt', e.target.value)}
-                  placeholder="Negative prompt (leave blank for Qwen-Image / Flux)"
+                  placeholder="Negative prompt (usually blank for Qwen-Image and FLUX.2)"
                 />
               ) : (
                 <button onClick={() => setShowNeg(true)} className="self-start text-[11px] text-ink-300 hover:text-safelight">
@@ -168,11 +177,13 @@ export function StudioView() {
 
           <Section title="Images" open={imagesOpen} onToggle={setImagesOpen}>
             <RefImages orModel={model} />
-            {local && advanced && (
+            {/* An init image stays visible (with its Remove button) even where it can't be used, so it never blocks generation unseen. */}
+            {local && ((advanced && initSupported) || hasInit) && (
               <div className="flex flex-col gap-3 border-t border-ink-800 pt-3">
                 <span className="label-caps">Init image · img2img / inpaint</span>
+                {!initSupported && <p className="text-[11px] leading-snug text-stop">The loaded model has no img2img — remove the init image, or use it as a reference image instead.</p>}
                 <InitImage />
-                {hasInit && <StrengthField />}
+                {hasInit && initSupported && <StrengthField />}
               </div>
             )}
           </Section>
@@ -187,7 +198,7 @@ export function StudioView() {
             </Section>
           )}
 
-          {local && advanced && (
+          {local && advanced && !diffusers && (
             <>
               <LoraSection />
               <HiresSection />

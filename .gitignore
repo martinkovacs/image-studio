@@ -8,3 +8,4 @@ resources/sdcpp/
 *.log
 .DS_Store
 tsconfig.*.tsbuildinfo
+__pycache__/

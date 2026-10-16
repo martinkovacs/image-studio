@@ -12,7 +12,8 @@ import process from 'node:process'
 const [binArg, , modelArgRaw] = process.argv.slice(2)
 const modelIdx = process.argv.indexOf('--model')
 const model = modelIdx >= 0 ? process.argv[modelIdx + 1] : null
-const bin = binArg
+// Absolute: the child runs with cwd = the binary's folder, so a relative path would not resolve.
+const bin = binArg && path.resolve(binArg)
 if (!bin || !existsSync(bin) || !statSync(bin).isFile()) {
   console.error('usage: node scripts/smoke-sdserver.mjs <path-to-sd-server> [--model <path>]')
   process.exit(1)

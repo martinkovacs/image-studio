@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   AppSettings,
+  BackendInfo,
   DeepPartial,
   GenerationProgress,
   GenerationRequest,
@@ -13,6 +14,8 @@ import type {
   SdImgGenBody,
   ServerStatus
 } from '@shared/types'
+import { CATALOG_BY_ID } from '@shared/catalog'
+import { profileBackend } from '@shared/types'
 import { uid } from './lib/util'
 import { SLIM } from './lib/edition'
 
@@ -31,10 +34,14 @@ export interface Inputs {
 }
 
 type View = 'main' | 'settings'
+export type SettingsTab = 'general' | 'openrouter' | 'engine' | 'browser' | 'profiles' | 'huggingface' | 'log'
 
 interface State {
   settings: AppSettings | null
   view: View
+  settingsTab: SettingsTab
+  /** Hardware probe + backend choice (full edition only). */
+  backendInfo: BackendInfo | null
   provider: ProviderId
   prompt: string
   negativePrompt: string
@@ -64,6 +71,8 @@ interface Actions {
   init(): Promise<void>
   updateSettings(patch: DeepPartial<AppSettings>): Promise<void>
   setView(v: View): void
+  openSettings(tab?: SettingsTab): void
+  refreshBackend(refresh?: boolean): Promise<void>
   set<K extends keyof State>(key: K, value: State[K]): void
   setOrParam<K extends keyof OrImageParams>(key: K, value: OrImageParams[K]): void
   setOrModel(id: string): void
@@ -125,12 +134,30 @@ export function effectiveLocalParams(s: Pick<State, 'caps' | 'localParams'>): Sd
   return mergeBody(defaults, s.localParams)
 }
 
+/** Recommended per-generation settings when the active profile came from the supported-model catalog. */
+/** Recipe defaults of the active catalog profile, before its model is loaded (no caps yet). */
+function pendingCatalogDefaults(s: Pick<State, 'settings'>): SdImgGenBody {
+  const profile = activeProfile(s)
+  if (!profile?.catalogId) return {}
+  return CATALOG_BY_ID.get(profile.catalogId)?.recipes[profileBackend(profile)]?.defaults ?? {}
+}
+
+function catalogDefaults(s: Pick<State, 'settings' | 'serverStatus'>, caps: SdCapabilities): SdImgGenBody | null {
+  const profile = activeProfile(s)
+  if (!profile?.catalogId) return null
+  // Only when the loaded server really runs the active profile (it may have changed while loading).
+  if (s.serverStatus.profileId !== profile.id || profileBackend(profile) !== (caps.backend ?? 'sdcpp')) return null
+  return CATALOG_BY_ID.get(profile.catalogId)?.recipes[profileBackend(profile)]?.defaults ?? null
+}
+
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let initialized = false
 
 export const useStore = create<Store>((set, get) => ({
   settings: null,
   view: 'main',
+  settingsTab: 'general',
+  backendInfo: null,
   provider: SLIM ? 'openrouter' : (localStorage.getItem('provider') as ProviderId) || 'openrouter',
   prompt: '',
   negativePrompt: '',
@@ -156,30 +183,45 @@ export const useStore = create<Store>((set, get) => ({
     const settings = await window.api.settings.get()
     const orModel = localStorage.getItem('orModel') || settings.openrouter.defaultModel
     set({ settings, orModel, orExtraJson: loadOrExtraMap()[orModel] ?? '' })
+    window.api.settings.onChanged((settings) => set({ settings }))
+    if (!SLIM) window.api.catalog.onError((e) => get().showError(e.error))
     window.api.gen.onProgress((p) => {
       const job = get().jobs[p.jobId]
       if (job) set({ jobs: { ...get().jobs, [p.jobId]: { ...job, progress: p } } })
     })
     window.api.local.onStatus((s) => {
       set({ serverStatus: s })
-      if (s.state === 'ready') void get().refreshCaps()
+      if (s.state === 'ready') get().refreshCaps().catch((e: Error) => get().showError(e.message))
       if (s.state === 'stopped' || s.state === 'error') set({ caps: null })
       if (s.state === 'error' && s.error) get().showError(s.error.split('\n')[0])
     })
     void get().loadOrModels()
     void get().refreshHistory()
     if (SLIM) return
+    get().refreshBackend().catch((e: Error) => get().showError(e.message))
     const status = await window.api.local.status()
     set({ serverStatus: status })
-    if (status.state === 'ready') void get().refreshCaps()
+    if (status.state === 'ready') get().refreshCaps().catch((e: Error) => get().showError(e.message))
   },
 
   async updateSettings(patch) {
+    const before = get().settings?.local.activeProfileId
     const settings = await window.api.settings.update(patch)
     set({ settings })
+    if (patch.local?.backend) get().refreshBackend().catch((e: Error) => get().showError(e.message))
+    // Another profile: the loaded model's capabilities and overrides no longer apply.
+    if (settings.local.activeProfileId !== before) {
+      set({ caps: null, localParams: {} })
+      const st = get().serverStatus
+      if (st.state === 'ready' && st.profileId === settings.local.activeProfileId) get().refreshCaps().catch(() => undefined)
+    }
   },
 
   setView: (view) => set({ view }),
+  openSettings: (tab) => set({ view: 'settings', ...(tab ? { settingsTab: tab } : {}) }),
+  async refreshBackend(refresh) {
+    set({ backendInfo: await window.api.backend.info(refresh) })
+  },
   set: (key, value) => {
     if (key === 'provider') {
       localStorage.setItem('provider', value as string)
@@ -229,9 +271,11 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   resetLocalToDefaults() {
-    const stem = get().caps?.model.stem
-    if (stem) localStorage.removeItem(localKey(stem))
-    set({ localParams: {} })
+    const caps = get().caps
+    const seeded = caps ? catalogDefaults(get(), caps) : null
+    if (caps && seeded) localStorage.setItem(localKey(caps.model.stem), JSON.stringify(seeded))
+    else if (caps) localStorage.removeItem(localKey(caps.model.stem))
+    set({ localParams: seeded ?? {} })
   },
 
   async loadOrModels(force) {
@@ -246,7 +290,14 @@ export const useStore = create<Store>((set, get) => ({
 
   async refreshCaps() {
     const caps = await window.api.local.capabilities()
-    set({ caps, localParams: caps ? loadLocalOverrides(caps.model.stem) : {} })
+    if (!caps) return set({ caps, localParams: {} })
+    // Edits made while the model was loading (no caps yet) live only in memory; keep them.
+    const pending = get().caps ? {} : get().localParams
+    // First load of a model installed from the catalog: start from its recommended settings.
+    const seeded = localStorage.getItem(localKey(caps.model.stem)) === null ? catalogDefaults(get(), caps) : null
+    const localParams = mergeBody(seeded ?? loadLocalOverrides(caps.model.stem), pending)
+    if (seeded || Object.keys(pending).length) localStorage.setItem(localKey(caps.model.stem), JSON.stringify(localParams))
+    set({ caps, localParams })
   },
 
   async refreshHistory() {
@@ -262,6 +313,10 @@ export const useStore = create<Store>((set, get) => ({
       return null
     }
     const inputs = opts?.inputs ?? s.inputs
+    if (s.provider === 'local' && inputs.initImage && s.caps?.features_by_mode.img_gen?.init_image === false) {
+      s.showError('The loaded model does not support img2img — remove the init image, or add it as a reference image to edit')
+      return null
+    }
     const req: GenerationRequest = {
       provider: s.provider,
       prompt,
@@ -316,7 +371,9 @@ export const useStore = create<Store>((set, get) => ({
         return null
       }
       // Send only user overrides; server-side defaults fill the rest for whichever model is loaded.
-      req.local = s.localParams
+      // Not loaded yet: this request starts the server, so it can't wait for
+      // refreshCaps() to seed the catalog defaults — apply them here.
+      req.local = s.caps ? s.localParams : mergeBody(pendingCatalogDefaults(s), s.localParams)
     }
 
     const jobId = uid()
@@ -378,5 +435,5 @@ export const useStore = create<Store>((set, get) => ({
   }
 }))
 
-export const activeProfile = (s: State) =>
+export const activeProfile = (s: Pick<State, 'settings'>) =>
   s.settings?.local.profiles.find((p) => p.id === s.settings?.local.activeProfileId) ?? null

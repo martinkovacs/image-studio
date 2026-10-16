@@ -77,7 +77,7 @@ export function LocalResolution() {
         <Field label="Height">
           <NumberInput value={height} min={limits?.min_height ?? 64} max={limits?.max_height} step={snap} onChange={(v) => v && set(width, roundTo(v, snap))} />
         </Field>
-        <Field label="Snap" hint="Dimensions are rounded to this multiple. Qwen-Image needs 32; Flux 16; SD 8. 64 is safe for all.">
+        <Field label="Snap" hint="Dimensions are rounded to this multiple. Qwen-Image needs 32; FLUX.2 16. 64 is safe for all.">
           <Select
             value={String(snap)}
             onChange={(v) => {

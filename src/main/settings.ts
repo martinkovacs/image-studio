@@ -6,6 +6,7 @@ import type { AppSettings, DeepPartial } from '@shared/types'
 
 const settingsPath = (): string => join(app.getPath('userData'), 'settings.json')
 const keyPath = (): string => join(app.getPath('userData'), 'openrouter.key')
+const hfTokenPath = (): string => join(app.getPath('userData'), 'huggingface.key')
 
 function defaults(): AppSettings {
   return {
@@ -14,7 +15,10 @@ function defaults(): AppSettings {
     theme: 'dark',
     outputDir: join(app.getPath('pictures'), 'Image Studio'),
     openrouter: { hasApiKey: false, defaultModel: 'google/gemini-3-pro-image' },
+    huggingface: { hasToken: false },
     local: {
+      backend: 'auto',
+      modelsDir: join(app.getPath('userData'), 'models'),
       engineVariant: '',
       customServerPath: '',
       activeProfileId: null,
@@ -41,8 +45,9 @@ function merge<T>(base: T, patch: unknown): T {
 
 // ---------------------------------------------------------------------------
 // Renderer patches are untrusted: keep only known keys with the right types.
-// outputDir and customServerPath are deliberately absent — they widen file
-// access / choose an executable, so only main-process dialogs may set them.
+// outputDir, customServerPath and modelsDir are deliberately absent — they
+// widen file access / choose an executable / choose where downloads are
+// written, so only main-process dialogs may set them.
 
 type Check = (v: unknown) => boolean
 const isStr: Check = (v) => typeof v === 'string' && v.length < 4096
@@ -52,11 +57,13 @@ const isArg: Check = (v) => typeof v === 'boolean' || (typeof v === 'number' && 
 
 function isProfile(v: unknown): boolean {
   if (!isPlainObject(v)) return false
-  const { id, name, args, extraArgs } = v
+  const { id, name, args, extraArgs, backend, catalogId } = v
   return (
     isStr(id) &&
     isStr(name) &&
     isStr(extraArgs) &&
+    (backend === undefined || backend === 'sdcpp' || backend === 'diffusers') &&
+    (catalogId === undefined || isStr(catalogId)) &&
     isPlainObject(args) &&
     Object.entries(args).every(([k, a]) => /^[a-z][a-z0-9_-]*$/.test(k) && isArg(a))
   )
@@ -68,6 +75,7 @@ const SCHEMA: Record<string, Check | Record<string, Check>> = {
   theme: oneOf('dark', 'light', 'system'),
   openrouter: { defaultModel: isStr },
   local: {
+    backend: oneOf('auto', 'sdcpp', 'diffusers'),
     engineVariant: isStr,
     activeProfileId: (v) => v === null || isStr(v),
     listenPort: isPort,
@@ -107,13 +115,15 @@ export function getSettings(): AppSettings {
     }
     cache = merge(defaults(), stored)
     cache.openrouter.hasApiKey = existsSync(keyPath())
+    cache.huggingface.hasToken = existsSync(hfTokenPath())
   }
   return cache
 }
 
 function persist(settings: AppSettings): Promise<void> {
   const data = JSON.stringify(settings, null, 2)
-  writeQueue = writeQueue.then(async () => {
+  // catch first: one failed write must not reject every later one.
+  writeQueue = writeQueue.catch(() => undefined).then(async () => {
     await mkdir(app.getPath('userData'), { recursive: true })
     const tmp = settingsPath() + '.tmp'
     await writeFile(tmp, data)
@@ -127,33 +137,55 @@ export async function updateSettings(patch: DeepPartial<AppSettings>): Promise<A
   const next = merge(getSettings(), patch)
   // Derived from the key file; never writable from the renderer.
   next.openrouter.hasApiKey = existsSync(keyPath())
+  next.huggingface.hasToken = existsSync(hfTokenPath())
   cache = next
   await persist(next)
   return getSettings()
 }
 
-// The OpenRouter key is encrypted with the OS keychain (safeStorage) and never
-// sent to the renderer.
-export async function setOpenRouterKey(key: string | null): Promise<void> {
-  const trimmed = key?.trim()
+// Secrets (OpenRouter key, Hugging Face token) are encrypted with the OS
+// keychain (safeStorage) and never sent to the renderer.
+async function writeSecret(path: string, value: string | null, what: string): Promise<boolean> {
+  const trimmed = value?.trim()
   if (!trimmed) {
-    await rm(keyPath(), { force: true })
-  } else {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('OS secure storage is unavailable; cannot store the API key safely.')
-    }
-    await mkdir(app.getPath('userData'), { recursive: true })
-    await writeFile(keyPath(), safeStorage.encryptString(trimmed), { mode: 0o600 })
+    await rm(path, { force: true })
+    return false
   }
-  getSettings().openrouter.hasApiKey = !!trimmed
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error(`OS secure storage is unavailable; cannot store the ${what} safely.`)
+  }
+  await mkdir(app.getPath('userData'), { recursive: true })
+  await writeFile(path, safeStorage.encryptString(trimmed), { mode: 0o600 })
+  return true
+}
+
+function readSecret(path: string, what: string): string | null {
+  try {
+    if (!existsSync(path)) return null
+    return safeStorage.decryptString(readFileSync(path))
+  } catch (err) {
+    console.error(`Failed to decrypt ${what}:`, err)
+    return null
+  }
+}
+
+export async function setOpenRouterKey(key: string | null): Promise<void> {
+  getSettings().openrouter.hasApiKey = await writeSecret(keyPath(), key, 'API key')
 }
 
 export function getOpenRouterKey(): string | null {
-  try {
-    if (!existsSync(keyPath())) return null
-    return safeStorage.decryptString(readFileSync(keyPath()))
-  } catch (err) {
-    console.error('Failed to decrypt OpenRouter key:', err)
-    return null
+  return readSecret(keyPath(), 'OpenRouter key')
+}
+
+export async function setHfToken(token: string | null): Promise<void> {
+  // HF user access tokens are "hf_" + alphanumerics; reject anything that could
+  // smuggle header syntax into the Authorization header.
+  if (token?.trim() && !/^hf_[A-Za-z0-9]{20,200}$/.test(token.trim())) {
+    throw new Error('That does not look like a Hugging Face access token (expected hf_…)')
   }
+  getSettings().huggingface.hasToken = await writeSecret(hfTokenPath(), token, 'Hugging Face token')
+}
+
+export function getHfToken(): string | null {
+  return readSecret(hfTokenPath(), 'Hugging Face token')
 }

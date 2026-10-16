@@ -1,20 +1,24 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { SLIM } from '../lib/edition'
-import { Check, Cloud, Copy, Cpu, Download, FolderOpen, HardDrive, KeyRound, Layers, Palette, Play, RefreshCw, ScrollText, Square } from 'lucide-react'
-import type { EngineInfo, EngineInstallProgress, LocalModelProfile } from '@shared/types'
-import { useStore } from '../store'
+import { Boxes, Check, Cloud, Copy, Cpu, Download, FolderOpen, HardDrive, KeyRound, Layers, Palette, Play, RefreshCw, ScrollText, Square, Trash2 } from 'lucide-react'
+import { profileBackend, type BackendPreference, type DiffusersRuntimeInfo, type EngineInfo, type EngineInstallProgress, type LocalModelProfile, type RuntimeInstallProgress } from '@shared/types'
+import { formatBytes } from '@shared/quants'
+import { useStore, type SettingsTab } from '../store'
 import { Button, Combobox, cx, Field, NumberInput, Segmented, TextInput } from '../components/ui'
 import { uid } from '../lib/util'
 import { ServerDot } from '../studio/ModelPicker'
-import { ProfileEditor } from './ProfileEditor'
+import { BACKEND_LABEL, mainModelPath, ProfileEditor } from './ProfileEditor'
+import { ModelBrowser } from './ModelBrowser'
 
-type Tab = 'general' | 'openrouter' | 'engine' | 'profiles' | 'log'
+type Tab = SettingsTab
 
 const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: 'general', label: 'General', icon: <Palette size={15} /> },
   { id: 'openrouter', label: 'OpenRouter', icon: <Cloud size={15} /> },
   { id: 'engine', label: 'Local engine', icon: <Cpu size={15} /> },
+  { id: 'browser', label: 'Model browser', icon: <Boxes size={15} /> },
   { id: 'profiles', label: 'Local models', icon: <Layers size={15} /> },
+  { id: 'huggingface', label: 'Hugging Face', icon: <KeyRound size={15} /> },
   { id: 'log', label: 'Server log', icon: <ScrollText size={15} /> }
 ]
 
@@ -194,14 +198,167 @@ function CodeLine({ text }: { text: string }) {
   return (
     <div className="flex items-center justify-between gap-2 rounded-md border border-ink-800 bg-ink-950 px-3 py-2 font-mono text-[12px] text-ink-200">
       <span className="select-text">{text}</span>
-      <button onClick={() => void navigator.clipboard.writeText(text)} className="text-ink-400 hover:text-ink-100">
+      <button title="Copy" aria-label="Copy" onClick={() => void navigator.clipboard.writeText(text)} className="text-ink-400 hover:text-ink-100">
         <Copy size={12} />
       </button>
     </div>
   )
 }
 
+function BackendCard() {
+  const settings = useStore((s) => s.settings)!
+  const update = useStore((s) => s.updateSettings)
+  const info = useStore((s) => s.backendInfo)
+  const refresh = useStore((s) => s.refreshBackend)
+  const gpus = info?.hardware.gpus ?? []
+  return (
+    <Card
+      title="Backend"
+      aside={
+        <button title="Detect hardware again" onClick={() => void refresh(true)} className="text-ink-400 hover:text-ink-100">
+          <RefreshCw size={12} />
+        </button>
+      }
+    >
+      <p className="text-[12px] leading-relaxed text-ink-300">
+        Local models run on Hugging Face <b className="font-medium text-ink-200">diffusers</b> (PyTorch + CUDA, fastest on NVIDIA GPUs) or on{' '}
+        <b className="font-medium text-ink-200">stable-diffusion.cpp</b> (Vulkan, ROCm, Metal or CPU — runs everywhere, GGUF quantizations). Auto picks diffusers
+        when an NVIDIA GPU is present.
+      </p>
+      <Row label="Use" desc={info ? `Auto: ${info.reason}` : 'Detecting hardware…'}>
+        <Segmented<BackendPreference>
+          value={settings.local.backend}
+          onChange={(v) => void update({ local: { backend: v } })}
+          options={[
+            { value: 'auto', label: info ? `Auto · ${info.autoChoice === 'diffusers' ? 'diffusers' : 'sd.cpp'}` : 'Auto' },
+            { value: 'diffusers', label: 'diffusers', title: info && !info.diffusersSupported ? 'Needs an NVIDIA GPU on Linux or Windows x64' : undefined },
+            { value: 'sdcpp', label: 'sd.cpp' }
+          ]}
+        />
+      </Row>
+      {info && (
+        <div className="flex flex-wrap gap-x-5 gap-y-1 font-mono text-[11px] text-ink-300">
+          {gpus.length === 0 && <span>no GPU detected</span>}
+          {gpus.map((g, i) => (
+            <span key={i} className="text-ink-300">
+              {g.name}
+              {g.vramMiB ? ` · ${(g.vramMiB / 1024).toFixed(0)} GB` : ''}
+            </span>
+          ))}
+          <span>{(info.hardware.ramMiB / 1024).toFixed(0)} GB RAM</span>
+          {info.effective === 'diffusers' && !info.diffusersSupported && <span className="text-stop">diffusers is not supported on this platform</span>}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function DiffusersCard() {
+  const showError = useStore((s) => s.showError)
+  const [info, setInfo] = useState<DiffusersRuntimeInfo | null>(null)
+  const [progress, setProgress] = useState<RuntimeInstallProgress | null>(null)
+  const [log, setLog] = useState<string[]>([])
+  const load = async () => setInfo(await window.api.diffusers.info())
+  useEffect(() => {
+    void load()
+    return window.api.diffusers.onInstallProgress((p) => {
+      if (p.log) setLog((cur) => [...cur.slice(-199), p.log!])
+      else setProgress(p)
+      if (p.phase === 'done' || p.phase === 'error') void load()
+    })
+  }, [])
+  // info.busy survives remounts (the install keeps running in the main process); progress is this view's live feed.
+  const busy = (!!progress && progress.phase !== 'done' && progress.phase !== 'error') || !!info?.busy
+  const install = async () => {
+    setLog([])
+    setProgress({ phase: 'uv', message: 'Starting…' })
+    try {
+      await window.api.diffusers.install()
+    } catch (err) {
+      setProgress({ phase: 'error', error: (err as Error).message })
+    }
+  }
+  const PHASES: RuntimeInstallProgress['phase'][] = ['uv', 'python', 'venv', 'torch', 'packages', 'verify']
+  const step = progress ? PHASES.indexOf(progress.phase) : -1
+
+  return (
+    <Card title="diffusers runtime" aside={info?.diffusersVersion && <span className="font-mono text-[11px] text-ink-300">diffusers {info.diffusersVersion}</span>}>
+      <p className="text-[12px] leading-relaxed text-ink-300">
+        A private Python environment (uv, Python 3.12, PyTorch with CUDA, diffusers) installed into the app&apos;s data folder. Needs about 8 GB of disk and an
+        NVIDIA driver; nothing is installed system-wide.
+      </p>
+      {info && !info.supported && <p className="text-[12px] text-stop">Not available on this platform: PyTorch CUDA builds exist for Linux and Windows x64 only.</p>}
+      {info?.installed && (
+        <div className="flex flex-wrap gap-x-5 gap-y-1 font-mono text-[11px] text-ink-300">
+          <span>torch {info.torchVersion}</span>
+          <span className={info.cudaAvailable ? 'text-fixer' : 'text-stop'}>{info.cudaAvailable ? `CUDA · ${info.deviceName ?? 'GPU'}` : 'CUDA unavailable — check the NVIDIA driver'}</span>
+          {info.sizeBytes ? <span className="text-ink-300">{formatBytes(info.sizeBytes)} on disk</span> : null}
+          {info.outdated && <span className="text-safelight">update available</span>}
+        </div>
+      )}
+      {busy && !progress && <p className="text-[12px] text-ink-300">Installing in the background…</p>}
+      {busy && progress && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-3">
+            <div className="h-[3px] flex-1 overflow-hidden rounded-full bg-ink-700">
+              <div
+                className="h-full bg-safelight transition-[width]"
+                style={{ width: `${progress.total ? ((progress.received ?? 0) / progress.total) * 100 : ((step + 0.5) / PHASES.length) * 100}%` }}
+              />
+            </div>
+            <span className="font-mono text-[10px] text-ink-300">{progress.message ?? progress.phase}</span>
+          </div>
+          {log.length > 0 && <pre className="max-h-28 select-text overflow-auto rounded-md border border-ink-800 bg-ink-950 p-2 font-mono text-[10px] leading-relaxed text-ink-300">{log.slice(-8).join('\n')}</pre>}
+        </div>
+      )}
+      {progress?.phase === 'error' && <p className="select-text text-[12px] text-stop">{progress.error}</p>}
+      {info?.supported && (
+        <div className="flex gap-2">
+          <Button size="sm" variant={info.installed && !info.outdated ? 'outline' : 'primary'} disabled={busy} onClick={() => void install()}>
+            <Download size={12} /> {info.installed ? (info.outdated ? 'Update' : 'Reinstall') : 'Install'}
+          </Button>
+          {info.installed && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              className="text-ink-300 hover:text-stop"
+              onClick={async () => {
+                if (!confirm('Remove the diffusers runtime? Downloaded models are kept.')) return
+                await window.api.diffusers.remove().catch((e: Error) => showError(e.message))
+                void load()
+              }}
+            >
+              <Trash2 size={12} /> Remove
+            </Button>
+          )}
+        </div>
+      )}
+    </Card>
+  )
+}
+
 function EngineTab() {
+  const effective = useStore((s) => s.backendInfo?.effective)
+  return (
+    <>
+      <BackendCard />
+      {effective === 'sdcpp' ? (
+        <>
+          <SdcppCard />
+          <DiffusersCard />
+        </>
+      ) : (
+        <>
+          <DiffusersCard />
+          <SdcppCard />
+        </>
+      )}
+    </>
+  )
+}
+
+function SdcppCard() {
   const settings = useStore((s) => s.settings)!
   const update = useStore((s) => s.updateSettings)
   const showError = useStore((s) => s.showError)
@@ -353,6 +510,8 @@ function ProfilesTab() {
   const settings = useStore((s) => s.settings)!
   const update = useStore((s) => s.updateSettings)
   const status = useStore((s) => s.serverStatus)
+  const backendInfo = useStore((s) => s.backendInfo)
+  const openSettings = useStore((s) => s.openSettings)
   const [editing, setEditing] = useState<LocalModelProfile | null>(null)
   const [restartId, setRestartId] = useState<string | null>(null)
   const profiles = settings.local.profiles
@@ -375,13 +534,18 @@ function ProfilesTab() {
     )
   }
 
-  const mainFile = (p: LocalModelProfile) => String(p.args['diffusion-model'] ?? p.args['model'] ?? '').split(/[\\/]/).pop()
+  const mainFile = (p: LocalModelProfile) => mainModelPath(p).split(/[\\/]/).pop()
+  const effective = backendInfo?.effective ?? 'sdcpp'
 
   return (
     <>
       <p className="text-[13px] leading-relaxed text-ink-300">
-        A profile tells sd.cpp which weight files to load and how. It works with any model family sd.cpp supports; once loaded, the model's own sampler and
-        size defaults appear in the studio.
+        A profile tells a local backend which weight files to load and how. The{' '}
+        <button className="text-safelight hover:underline" onClick={() => openSettings('browser')}>
+          model browser
+        </button>{' '}
+        creates them for supported models; you can also point a profile at any files you have. The studio lists profiles for the backend in use (
+        {BACKEND_LABEL[effective]}).
       </p>
       {restartId && (
         <div className="flex items-center justify-between rounded-md border border-safelight/40 bg-safelight/5 px-4 py-2.5 text-[13px]">
@@ -402,14 +566,23 @@ function ProfilesTab() {
       <div className="grid grid-cols-2 gap-3">
         {profiles.map((p) => {
           const active = p.id === settings.local.activeProfileId
+          const other = profileBackend(p) !== effective
           return (
-            <div key={p.id} className={cx('flex flex-col gap-3 rounded-lg border bg-ink-900 p-4', active ? 'border-safelight/50' : 'border-ink-800')}>
+            <div key={p.id} className={cx('flex flex-col gap-3 rounded-lg border bg-ink-900 p-4', active ? 'border-safelight/50' : 'border-ink-800', other && 'opacity-60')}>
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="truncate font-display text-[14px] font-semibold text-ink-100">{p.name}</div>
                   <div className="truncate font-mono text-[10px] text-ink-300">{mainFile(p) || 'no model file'}</div>
                 </div>
-                {active && <span className="rounded bg-safelight/15 px-1.5 py-0.5 font-mono text-[10px] text-safelight">active</span>}
+                <div className="flex shrink-0 gap-1">
+                  <span
+                    title={other ? `Not the backend in use (${BACKEND_LABEL[effective]})` : undefined}
+                    className="rounded border border-ink-700 px-1.5 py-0.5 font-mono text-[10px] text-ink-300"
+                  >
+                    {profileBackend(p) === 'diffusers' ? 'diffusers' : 'sd.cpp'}
+                  </span>
+                  {active && <span className="rounded bg-safelight/15 px-1.5 py-0.5 font-mono text-[10px] text-safelight">active</span>}
+                </div>
               </div>
               <div className="flex gap-1.5">
                 <Button size="sm" onClick={() => setEditing(p)}>
@@ -441,12 +614,85 @@ function ProfilesTab() {
           )
         })}
         <button
-          onClick={() => setEditing({ id: uid(), name: '', args: {}, extraArgs: '' })}
+          onClick={() => setEditing({ id: uid(), name: '', backend: effective, args: {}, extraArgs: '' })}
           className="flex min-h-28 items-center justify-center rounded-lg border border-dashed border-ink-700 text-[13px] text-ink-300 hover:border-safelight/60 hover:text-ink-100"
         >
           + New profile
         </button>
       </div>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+function HuggingFaceTab() {
+  const settings = useStore((s) => s.settings)!
+  const showError = useStore((s) => s.showError)
+  const [token, setToken] = useState('')
+  const refreshSettings = async () => useStore.setState({ settings: await window.api.settings.get() })
+  return (
+    <>
+      <Card title="Access token">
+        {settings.huggingface.hasToken ? (
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-2 text-[13px] text-ink-200">
+              <Check size={14} className="text-fixer" /> Token stored, encrypted with the OS keychain
+            </span>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={async () => {
+                await window.api.hf.setToken(null)
+                await refreshSettings()
+              }}
+            >
+              Remove
+            </Button>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <TextInput type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="hf_…" className="font-mono" />
+            <Button
+              variant="primary"
+              disabled={!token.trim()}
+              onClick={async () => {
+                try {
+                  await window.api.hf.setToken(token)
+                  setToken('')
+                  await refreshSettings()
+                } catch (err) {
+                  showError((err as Error).message)
+                }
+              }}
+            >
+              <KeyRound size={13} /> Save
+            </Button>
+          </div>
+        )}
+        <p className="text-[12px] leading-relaxed text-ink-300">
+          Only needed for gated repositories such as FLUX.2 [klein] 9B: accept the licence on the model page, then create a read token at{' '}
+          <a href="https://huggingface.co/settings/tokens" target="_blank" className="text-safelight hover:underline">
+            huggingface.co/settings/tokens
+          </a>
+          . It is only sent to huggingface.co and never leaves the main process.
+        </p>
+      </Card>
+      <Card title="Models folder">
+        <Field label="Downloads" hint="Each repository is stored as <owner>/<name> with its original file layout.">
+          <div className="flex gap-2">
+            <TextInput readOnly value={settings.local.modelsDir} className="font-mono text-[11px]" />
+            <Button
+              onClick={async () => {
+                const s = await window.api.hf.chooseModelsDir()
+                if (s) useStore.setState({ settings: s })
+              }}
+            >
+              <FolderOpen size={13} /> Change…
+            </Button>
+          </div>
+        </Field>
+      </Card>
     </>
   )
 }
@@ -508,7 +754,9 @@ function LogTab() {
 // ---------------------------------------------------------------------------
 
 export function SettingsView() {
-  const [tab, setTab] = useState<Tab>('general')
+  const stored = useStore((s) => s.settingsTab)
+  const tab = SLIM && stored !== 'openrouter' ? 'general' : stored
+  const setTab = (t: Tab) => useStore.setState({ settingsTab: t })
   return (
     <div className="flex h-full">
       <aside className="w-56 shrink-0 border-r border-ink-800 bg-ink-900 p-3">
@@ -532,7 +780,9 @@ export function SettingsView() {
           {tab === 'general' && <GeneralTab />}
           {tab === 'openrouter' && <OpenRouterTab />}
           {tab === 'engine' && <EngineTab />}
+          {tab === 'browser' && <ModelBrowser />}
           {tab === 'profiles' && <ProfilesTab />}
+          {tab === 'huggingface' && <HuggingFaceTab />}
           {tab === 'log' && <LogTab />}
         </div>
       </div>

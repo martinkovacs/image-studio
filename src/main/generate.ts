@@ -16,6 +16,7 @@ import type {
   UpscaleRequest,
 } from '../shared/types'
 import type { HistoryStore } from './history'
+import type { LaunchSpec } from './backends/launch'
 import { generateImages, CancelledError, sanitizeExtraParams } from './openrouter'
 import { IS_SLIM } from '../shared/edition'
 
@@ -27,7 +28,7 @@ export interface SdServerLike {
   status(): ServerStatus
   start(
     profile: LocalModelProfile,
-    serverPath: string,
+    launch: LaunchSpec,
     port: number,
     opts?: { signal?: AbortSignal },
   ): Promise<ServerStatus>
@@ -59,7 +60,8 @@ export interface GeneratorDeps {
   getSettings: () => AppSettings
   getApiKey: () => string | null
   server: SdServerLike
-  resolveServerPath: (s: AppSettings) => Promise<string | null>
+  /** Builds the launch spec for one profile; throws a user-facing Error when the backend runtime is missing. */
+  resolveLaunch: (settings: AppSettings, profile: LocalModelProfile) => Promise<LaunchSpec>
   history: HistoryStore
   emitProgress: (p: GenerationProgress) => void
 }
@@ -72,17 +74,15 @@ export interface Generator {
 
 const NO_KEY_MSG = 'OpenRouter API key not set — add it in Settings'
 
-/** Error carrying the flag set by sd-server when it could not interrupt an already-running job. */
+/** Error carrying the flag set by the local engine when it could not interrupt an already-running job. */
 export const NON_INTERRUPTIBLE_CANCELLED_MSG =
-  'Cancelled — sd-server cannot interrupt a running generation, so it finishes in the background and the result is discarded.'
+  'Cancelled — the local engine cannot interrupt a running generation, so it finishes in the background and the result is discarded.'
 
 /**
- * The id of the job sd-server is currently generating. 'progress'/'stage' events
- * are process-wide (not per job), so listeners use this to attribute them.
+ * The id of the job the local engine is currently generating. 'progress'/'stage'
+ * events are process-wide (not per job), so listeners use this to attribute them.
  */
 let generatingJobId: string | null = null
-const NO_ENGINE_MSG =
-  'No stable-diffusion.cpp engine installed — install one in Settings → Local engine'
 const NO_PROFILE_MSG = 'No active local model profile selected — pick one in Settings'
 
 export function createGenerator(deps: GeneratorDeps): Generator {
@@ -100,12 +100,11 @@ export function createGenerator(deps: GeneratorDeps): Generator {
     const settings = deps.getSettings()
     const profile = settings.local.profiles.find((p) => p.id === settings.local.activeProfileId)
     if (!profile) throw new Error(NO_PROFILE_MSG)
-    const serverPath = await deps.resolveServerPath(settings)
-    if (!serverPath) throw new Error(NO_ENGINE_MSG)
     const status = deps.server.status()
     if (status.state !== 'ready' || status.profileId !== profile.id) {
       emit(jobId, { stage: 'loading', message: `Starting ${profile.name}` })
-      const started = await deps.server.start(profile, serverPath, settings.local.listenPort, { signal })
+      const launch = await deps.resolveLaunch(settings, profile)
+      const started = await deps.server.start(profile, launch, settings.local.listenPort, { signal })
       if (started.state !== 'ready') {
         throw new Error(started.error ?? 'Local engine failed to start')
       }
@@ -290,7 +289,7 @@ export function createGenerator(deps: GeneratorDeps): Generator {
       result = await deps.server.imgGen(body, {
         signal: ac.signal,
         onQueued: (pos) => {
-          emit(jobId, { stage: 'queued', message: `Waiting in sd-server queue (position ${pos})` })
+          emit(jobId, { stage: 'queued', message: `Waiting in local engine queue (position ${pos})` })
         },
         onState: (state) => {
           if (state === 'generating') generatingJobId = jobId

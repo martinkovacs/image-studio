@@ -1,6 +1,6 @@
 import { Dices, Plus, RotateCcw, Trash2 } from 'lucide-react'
-import type { OrImageModel, SdImgGenBody } from '@shared/types'
-import { effectiveLocalParams, useStore } from '../store'
+import { profileBackend, type OrImageModel, type SdImgGenBody } from '@shared/types'
+import { activeProfile, effectiveLocalParams, useStore } from '../store'
 import { Button, Chip, Field, NumberInput, Section, Select, SliderField, TextInput, Toggle } from '../components/ui'
 
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31)
@@ -90,6 +90,12 @@ export function OpenRouterParams({ model }: { model: OrImageModel | undefined })
 
 type P = SdImgGenBody
 
+/** Blank (or unparseable) clears the override so the model's own schedule applies. */
+function parseSigmas(txt: string): number[] | undefined {
+  const list = txt.split(',').map((x) => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite)
+  return list.length ? list : undefined
+}
+
 export function LocalParams({ advanced }: { advanced: boolean }) {
   const caps = useStore((s) => s.caps)
   const localParams = useStore((s) => s.localParams)
@@ -104,12 +110,21 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
 
   const samplerOptions = caps?.samplers ?? []
   const schedulerOptions = caps?.schedulers ?? []
+  // The diffusers server lists the request fields its pipeline honours; sd-server honours everything.
+  const profile = useStore(activeProfile)
+  const dSupports =
+    caps?.backend === 'diffusers'
+      ? new Set(caps.diffusers?.supports ?? [])
+      : !caps && profile && profileBackend(profile) === 'diffusers'
+        ? new Set<string>() // not loaded yet: show only what every pipeline takes
+        : null
+  const has = (f: string) => !dSupports || dSupports.has(f)
 
   return (
     <>
       {!caps && (
         <p className="rounded-md border border-ink-800 bg-ink-900 p-2.5 text-[11px] leading-snug text-ink-300">
-          Load the model to see its defaults, samplers and limits. Parameters left untouched use the model's own defaults from sd.cpp.
+          Load the model to see its defaults, samplers and limits. Parameters left untouched use the model's own defaults.
         </p>
       )}
       <div className="flex items-center justify-between">
@@ -121,15 +136,22 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
         )}
       </div>
       <SliderField label="Steps" min={1} max={100} value={sp.sample_steps} onChange={(v) => setSp({ sample_steps: v })} />
-      <SliderField
-        label="CFG scale"
-        hint="Classifier-free guidance. Distilled/turbo models want 1.0; Qwen-Image 2.1 on sd.cpp ~6; SDXL 5–7."
-        min={0}
-        max={20}
-        step={0.1}
-        value={g.txt_cfg}
-        onChange={(v) => setG({ txt_cfg: v })}
-      />
+      {has('txt_cfg') && (
+        <SliderField
+          label={dSupports ? 'Guidance' : 'CFG scale'}
+          hint={
+            dSupports
+              ? 'Guidance scale. Qwen-Image: 1 disables CFG (set > 1 with a negative prompt); FLUX.2 [dev] ~4, Turbo 2.5.'
+              : 'Classifier-free guidance. Distilled/turbo models want 1.0; Qwen-Image 2.1 ~6; FLUX.2 1 (with distilled guidance).'
+          }
+          min={0}
+          max={20}
+          step={0.1}
+          value={g.txt_cfg}
+          onChange={(v) => setG({ txt_cfg: v })}
+        />
+      )}
+      {!dSupports && (
       <div className="grid grid-cols-2 gap-2">
         <Field label="Sampler">
           <Select
@@ -148,6 +170,7 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
           />
         </Field>
       </div>
+      )}
       <SeedField value={eff.seed} onChange={(v) => patch({ seed: v })} />
       <SliderField
         label="Batch"
@@ -157,11 +180,31 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
         onChange={(v) => patch({ batch_count: v })}
       />
 
-      {advanced && (
+      {advanced && dSupports && (
+        <>
+          <Field label="Output format">
+            <Select value={eff.output_format ?? 'png'} onChange={(v) => patch({ output_format: v })} options={caps?.output_formats_by_mode?.img_gen ?? ['png', 'jpeg', 'webp']} />
+          </Field>
+          {has('custom_sigmas') && (
+            <Field label="Custom sigmas" hint="Comma-separated sigma schedule; overrides the step count. Turbo models ship one pre-filled.">
+              <TextInput
+                placeholder="pipeline schedule"
+                defaultValue={(sp.custom_sigmas ?? []).join(', ')}
+                onBlur={(e) => {
+                  const txt = e.target.value.trim()
+                  setSp({ custom_sigmas: parseSigmas(txt) })
+                }}
+              />
+            </Field>
+          )}
+        </>
+      )}
+
+      {advanced && !dSupports && (
         <>
           <SliderField
             label="Flow shift"
-            hint="For flow models (Qwen, Flux, SD3, Wan). Empty = automatic / model default."
+            hint="For flow models (Qwen-Image, FLUX.2). Empty = automatic / model default."
             min={0}
             max={12}
             step={0.1}
@@ -170,7 +213,7 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
             onChange={(v) => setSp({ flow_shift: v ?? null })}
           />
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Distilled guid." hint="Flux.1-dev style embedded guidance (--guidance).">
+            <Field label="Distilled guid." hint="Embedded guidance for guidance-distilled models such as FLUX.2 [dev] (--guidance).">
               <NumberInput value={g.distilled_guidance} step={0.1} onChange={(v) => setG({ distilled_guidance: v })} />
             </Field>
             <Field label="Image CFG" hint="Image guidance for instruct-pix2pix style edit models. Empty = same as CFG.">
@@ -199,7 +242,7 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
               defaultValue={(sp.custom_sigmas ?? []).join(', ')}
               onBlur={(e) => {
                 const txt = e.target.value.trim()
-                setSp({ custom_sigmas: txt ? txt.split(',').map(Number).filter(Number.isFinite) : [] })
+                setSp({ custom_sigmas: parseSigmas(txt) })
               }}
             />
           </Field>
