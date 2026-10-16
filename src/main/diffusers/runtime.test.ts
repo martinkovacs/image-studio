@@ -5,9 +5,11 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import {
   TORCH_BACKEND,
+  UV_VERSION,
   installRuntimeCore,
   pythonPathIn,
   removeRuntime,
+  runtimeBusy,
   runtimeInfo,
   uvAssetName,
   uvBinaryName,
@@ -23,6 +25,13 @@ const sha256Hex = (data: Buffer | string): string => createHash('sha256').update
 const FAKE_UV = '#!/bin/sh\necho uv 0.9.0\n'
 const VERIFIED_JSON =
   '{"torch":"2.9.0+cu128","diffusers":"0.36.0","cuda":true,"device":"NVIDIA GeForce RTX 4090"}'
+// A tiny deterministic "archive". The checksum is verified for real, the
+// extraction is faked, so only the bytes need to exist.
+const ARCHIVE_BYTES = Buffer.from('pretend-this-is-a-targz-of-uv')
+const ASSET = uvAssetName('linux', 'x64') as string
+const PINNED_URL = `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${ASSET}`
+/** Checksum override matching the fake archive bytes (the embedded pin is for the real release). */
+const TEST_CHECKSUMS = { [ASSET]: sha256Hex(ARCHIVE_BYTES) }
 
 interface RecordedCmd {
   cmd: string
@@ -31,9 +40,10 @@ interface RecordedCmd {
 }
 
 interface FakeRunOpts {
+  /** Return 2 (torch import failure) for the python -c verification step. */
+  failVerifyTorch?: boolean
   /** Return 3 (diffusers import failure) for the python -c verification step. */
   failVerify?: boolean
-  includeVersionLine?: boolean
 }
 
 function makeFakeRun(opts: FakeRunOpts = {}): { run: RunFn, commands: RecordedCmd[] } {
@@ -53,6 +63,7 @@ function makeFakeRun(opts: FakeRunOpts = {}): { run: RunFn, commands: RecordedCm
       await fs.writeFile(path.join(venv, 'bin', 'python'), 'stub python')
     }
     if (args.includes('-c')) {
+      if (opts.failVerifyTorch) return 2
       if (opts.failVerify) return 3
       runOpts.onLine?.(VERIFIED_JSON)
     }
@@ -61,23 +72,10 @@ function makeFakeRun(opts: FakeRunOpts = {}): { run: RunFn, commands: RecordedCm
   return { run, commands }
 }
 
-// A tiny deterministic "archive". The checksum is verified for real, the
-// extraction is faked, so only the bytes need to exist.
-const ARCHIVE_BYTES = Buffer.from('pretend-this-is-a-targz-of-uv')
-
-function makeFetch(shaLine: string): typeof fetch {
-  const asset = uvAssetName('linux', 'x64') as string
-  const release = {
-    tag_name: '0.9.0',
-    assets: [
-      { name: asset, browser_download_url: `https://dl.test/${asset}` },
-      { name: `${asset}.sha256`, browser_download_url: `https://dl.test/${asset}.sha256` }
-    ]
-  }
+/** Serves the fake archive bytes at any URL, recording the requested URLs. */
+function makeFetch(requestedUrls: string[] = []): typeof fetch {
   return async (input: string | URL | globalThis.Request) => {
-    const url = String(input)
-    if (url.includes('releases/latest')) return new Response(JSON.stringify(release))
-    if (url.endsWith('.sha256')) return new Response(shaLine)
+    requestedUrls.push(String(input))
     return new Response(new Uint8Array(ARCHIVE_BYTES))
   }
 }
@@ -89,7 +87,8 @@ function coreOpts(root: string, requirementsPath: string, over: Partial<InstallR
     platform: 'linux',
     arch: 'x64',
     run: makeFakeRun().run,
-    fetchImpl: makeFetch(`${sha256Hex(ARCHIVE_BYTES)}  ${uvAssetName('linux', 'x64')}\n`),
+    fetchImpl: makeFetch(),
+    uvChecksums: TEST_CHECKSUMS,
     ...over
   }
 }
@@ -158,12 +157,14 @@ describe('installRuntimeCore', () => {
     return p
   }
 
-  it('downloads+verifies uv, then python/venv/torch/packages/verify, swapping the venv atomically', async () => {
+  it('downloads+verifies pinned uv, then python/venv/torch/packages/verify, swapping the venv atomically', async () => {
     const root = await newRoot('happy')
     const requirementsPath = await reqFile(root)
     const { run, commands } = makeFakeRun()
     const progress: import('@shared/types').RuntimeInstallProgress[] = []
-    const fake = makeFetch(`${sha256Hex(ARCHIVE_BYTES)}  ${uvAssetName('linux', 'x64')}\n`)
+    const requestedUrls: string[] = []
+    // A stale venv.old from an interrupted previous swap must not survive.
+    await fs.mkdir(path.join(root, 'venv.old'), { recursive: true })
 
     const state = await installRuntimeCore({
       root,
@@ -171,13 +172,17 @@ describe('installRuntimeCore', () => {
       platform: 'linux',
       arch: 'x64',
       run,
-      fetchImpl: fake,
+      fetchImpl: makeFetch(requestedUrls),
+      uvChecksums: TEST_CHECKSUMS,
       onProgress: (p) => progress.push(p)
     })
 
     // Phases in order (uv repeated for per-byte download progress).
     expect([...new Set(progress.map((p) => p.phase))]).toEqual(['uv', 'python', 'venv', 'torch', 'packages', 'verify', 'done'])
     expect(progress.some((p) => p.phase === 'uv' && p.received === ARCHIVE_BYTES.length)).toBe(true)
+
+    // The uv archive comes from the pinned release URL, no API/sha256 fetches.
+    expect(requestedUrls).toEqual([PINNED_URL])
 
     // Command sequence: tar extract, then uv calls, then the verifying python.
     const uvPath = path.join(root, 'uv', 'uv')
@@ -203,7 +208,7 @@ describe('installRuntimeCore', () => {
       expect(c.env.UV_PYTHON_PREFERENCE).toBe('only-managed')
     }
 
-    // Verified state + atomic swap artifacts.
+    // Verified state + swap artifacts.
     expect(state).toMatchObject({
       torchVersion: '2.9.0+cu128',
       diffusersVersion: '0.36.0',
@@ -213,6 +218,7 @@ describe('installRuntimeCore', () => {
     await expect(fs.readFile(path.join(root, 'uv', 'uv'), 'utf8')).resolves.toBe(FAKE_UV)
     await expect(fs.stat(path.join(root, 'venv', 'bin', 'python'))).resolves.toBeTruthy()
     await expect(fs.stat(path.join(root, 'venv.staging'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.stat(path.join(root, 'venv.old'))).rejects.toMatchObject({ code: 'ENOENT' })
     const stateFile = JSON.parse(await fs.readFile(path.join(root, 'state.json'), 'utf8')) as Record<string, string>
     expect(stateFile.requirementsSha256).toBe(sha256Hex(REQ_CONTENT))
     // The download scratch dir is gone again.
@@ -237,10 +243,15 @@ describe('installRuntimeCore', () => {
     const root = await newRoot('badsha')
     const requirementsPath = await reqFile(root)
     const { run, commands } = makeFakeRun()
-    const bad = makeFetch(`${'0'.repeat(64)}  ${uvAssetName('linux', 'x64')}\n`)
+    const requestedUrls: string[] = []
     await expect(
-      installRuntimeCore({ root, requirementsPath, platform: 'linux', arch: 'x64', run, fetchImpl: bad })
+      installRuntimeCore({
+        root, requirementsPath, platform: 'linux', arch: 'x64', run,
+        fetchImpl: makeFetch(requestedUrls),
+        uvChecksums: { [ASSET]: '0'.repeat(64) }
+      })
     ).rejects.toThrow('checksum mismatch')
+    expect(requestedUrls).toEqual([PINNED_URL])
     expect(commands.map((c) => c.cmd)).not.toContain('tar')
     await expect(fs.stat(path.join(root, 'uv', 'uv'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -256,7 +267,7 @@ describe('installRuntimeCore', () => {
     await fs.mkdir(path.join(root, 'uv'), { recursive: true })
     await fs.writeFile(uvPath, FAKE_UV) // skip the uv download branch
     await expect(
-      installRuntimeCore({ root, requirementsPath, platform: 'linux', arch: 'x64', run, fetchImpl: makeFetch('') })
+      installRuntimeCore({ root, requirementsPath, platform: 'linux', arch: 'x64', run, fetchImpl: makeFetch() })
     ).rejects.toThrow('diffusers cannot be imported')
     // The verify step ran, and only against the staging python.
     const verify = commands.filter((c) => c.args.includes('-c'))
@@ -265,6 +276,56 @@ describe('installRuntimeCore', () => {
     // Old venv untouched, staging cleaned up, no state.json.
     await expect(fs.readFile(path.join(root, 'venv', 'bin', 'python'), 'utf8')).resolves.toBe('old python')
     await expect(fs.stat(path.join(root, 'venv.staging'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.stat(path.join(root, 'state.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('fails the install when torch cannot be imported (exit 2)', async () => {
+    const root = await newRoot('failtorch')
+    const requirementsPath = await reqFile(root)
+    await fs.mkdir(path.join(root, 'venv', 'bin'), { recursive: true })
+    await fs.writeFile(path.join(root, 'venv', 'bin', 'python'), 'old python')
+    const { run, commands } = makeFakeRun({ failVerifyTorch: true })
+    await fs.mkdir(path.join(root, 'uv'), { recursive: true })
+    await fs.writeFile(path.join(root, 'uv', 'uv'), FAKE_UV)
+    await expect(
+      installRuntimeCore({ root, requirementsPath, platform: 'linux', arch: 'x64', run, fetchImpl: makeFetch() })
+    ).rejects.toThrow('Runtime verification failed: torch cannot be imported')
+    // Torch failures are distinct from diffusers failures (exit 2 vs 3).
+    const verify = commands.filter((c) => c.args.includes('-c'))
+    expect(verify).toHaveLength(1)
+    // Old venv untouched, staging cleaned up, no state.json.
+    await expect(fs.readFile(path.join(root, 'venv', 'bin', 'python'), 'utf8')).resolves.toBe('old python')
+    await expect(fs.stat(path.join(root, 'venv.staging'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.stat(path.join(root, 'state.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('restores the old venv when the swap-in rename fails', async () => {
+    const root = await newRoot('failswap')
+    const requirementsPath = await reqFile(root)
+    await fs.mkdir(path.join(root, 'venv', 'bin'), { recursive: true })
+    await fs.writeFile(path.join(root, 'venv', 'bin', 'python'), 'old python')
+    await fs.mkdir(path.join(root, 'uv'), { recursive: true })
+    await fs.writeFile(path.join(root, 'uv', 'uv'), FAKE_UV)
+    const { run } = makeFakeRun()
+    const stagingVenv = path.join(root, 'venv.staging')
+    const venvDir = path.join(root, 'venv')
+    const renames: string[] = []
+    const failSwapRename = async (from: string, to: string): Promise<void> => {
+      renames.push(`${from} -> ${to}`)
+      if (from === stagingVenv && to === venvDir) throw new Error('injected rename failure')
+      return fs.rename(from, to)
+    }
+    await expect(
+      installRuntimeCore({ root, requirementsPath, platform: 'linux', arch: 'x64', run, fetchImpl: makeFetch(), renameImpl: failSwapRename })
+    ).rejects.toThrow('injected rename failure')
+    // venv → venv.old ran, then staging → venv failed and venv.old came back.
+    expect(renames).toEqual([
+      `${venvDir} -> ${path.join(root, 'venv.old')}`,
+      `${stagingVenv} -> ${venvDir}`,
+      `${path.join(root, 'venv.old')} -> ${venvDir}`
+    ])
+    await expect(fs.readFile(path.join(venvDir, 'bin', 'python'), 'utf8')).resolves.toBe('old python')
+    await expect(fs.stat(path.join(root, 'venv.old'))).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(fs.stat(path.join(root, 'state.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -318,6 +379,74 @@ describe('removeRuntime', () => {
   })
 })
 
+// --- operation lock -----------------------------------------------------------
+
+describe('install/remove operation lock', () => {
+  const tmps: string[] = []
+  afterAll(async () => {
+    await Promise.all(tmps.map((r) => fs.rm(r, { recursive: true, force: true })))
+  })
+
+  const reqFile = async (dir: string): Promise<string> => {
+    const p = path.join(dir, 'requirements.txt')
+    await fs.writeFile(p, REQ_CONTENT)
+    return p
+  }
+
+  it('rejects removal while an install runs, and reports busy', async () => {
+    const root = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'rt-lock-install-')), 'diffusers-runtime')
+    tmps.push(root)
+    await fs.mkdir(root, { recursive: true })
+    const requirementsPath = await reqFile(root)
+    await fs.mkdir(path.join(root, 'uv'), { recursive: true })
+    await fs.writeFile(path.join(root, 'uv', 'uv'), FAKE_UV)
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const blocked: RunFn = async (cmd, args, opts) => {
+      await gate
+      const { run } = makeFakeRun()
+      return run(cmd, args, opts)
+    }
+    const install = installRuntimeCore({ root, requirementsPath, platform: 'linux', arch: 'x64', run: blocked })
+    expect(runtimeBusy()).toBe(true)
+    const info = await runtimeInfo(path.join(root, 'venv'), requirementsPath, 'linux', 'x64')
+    expect(info.busy).toBe(true)
+    await expect(removeRuntime(root)).rejects.toThrow('An install is running — wait for it to finish')
+    release()
+    await expect(install).resolves.toBeTruthy()
+    expect(runtimeBusy()).toBe(false)
+    expect((await runtimeInfo(path.join(root, 'venv'), requirementsPath, 'linux', 'x64')).busy).toBe(false)
+  })
+
+  it('rejects install while a removal runs', async () => {
+    const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rt-lock-remove-'))
+    tmps.push(parent)
+    const root = path.join(parent, 'diffusers-runtime')
+    const requirementsPath = await reqFile(parent)
+    await fs.mkdir(path.join(root, 'uv'), { recursive: true })
+    await fs.writeFile(path.join(root, 'uv', 'uv'), FAKE_UV)
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const gatedRemove: typeof fs.rm = async (p, opts) => {
+      await gate
+      return fs.rm(p, opts)
+    }
+    const removal = removeRuntime(root, gatedRemove)
+    expect(runtimeBusy()).toBe(true)
+    await expect(
+      installRuntimeCore({ root, requirementsPath, platform: 'linux', arch: 'x64', run: makeFakeRun().run, fetchImpl: makeFetch(), uvChecksums: TEST_CHECKSUMS })
+    ).rejects.toThrow('A removal is running — wait for it to finish')
+    release()
+    await expect(removal).resolves.toBeUndefined()
+    expect(runtimeBusy()).toBe(false)
+    await expect(fs.stat(root)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+})
+
 // --- runtimeInfo ------------------------------------------------------------
 
 describe('runtimeInfo', () => {
@@ -351,6 +480,7 @@ describe('runtimeInfo', () => {
     expect(info.supported).toBe(true)
     expect(info.installed).toBe(true)
     expect(info.outdated).toBe(false)
+    expect(info.busy).toBe(false)
     expect(info.pythonPath).toBe(path.join(root, 'venv', 'bin', 'python'))
     expect(info.torchVersion).toBe('2.9.0+cu128')
     expect(info.diffusersVersion).toBe('0.36.0')

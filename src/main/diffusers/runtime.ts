@@ -1,7 +1,8 @@
 // Managed Python runtime (<userData>/diffusers-runtime) for the diffusers
-// backend: uv from the astral-sh GitHub releases (checksum-verified), a
-// uv-managed Python 3.12, a staging venv with CUDA torch + diffusers swapped
-// in atomically, and a state.json with the install summary.
+// backend: a pinned, checksum-verified uv from the astral-sh GitHub releases, a
+// uv-managed Python 3.12, a staging venv with CUDA torch + diffusers swapped in
+// with the old venv kept as venv.old until the swap succeeds, and a state.json
+// with the install summary.
 // Electron-dependent functions are kept at the bottom; the pure helpers and
 // the core install routine (injected run/fetch) are exported separately so
 // they are unit-testable.
@@ -17,7 +18,20 @@ import type { DiffusersRuntimeInfo, RuntimeInstallProgress } from '@shared/types
 /** CUDA variant for the torch install; a single source of truth. */
 export const TORCH_BACKEND = 'cu128'
 
-const UV_RELEASE_URL = 'https://api.github.com/repos/astral-sh/uv/releases/latest'
+// Pinned uv release. Checked 2026-10-16: tag from the GitHub latest release,
+// checksums from the published <asset>.sha256 files (the linux asset was also
+// verified by downloading it and running sha256sum). To bump: pick the new
+// tag from https://github.com/astral-sh/uv/releases, refresh every checksum
+// below from https://github.com/astral-sh/uv/releases/download/<tag>/<asset>.sha256.
+/** Pinned uv release tag (see the bump instructions above). */
+export const UV_VERSION = '0.13.1'
+const uvReleaseUrl = (asset: string) => `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${asset}`
+/** SHA-256 of each supported uv asset, embedded so no .sha256 fetch is needed. */
+const UV_CHECKSUMS: Record<string, string> = {
+  'uv-x86_64-unknown-linux-gnu.tar.gz': 'eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf90220',
+  'uv-x86_64-pc-windows-msvc.zip': '3b2661a463a5baea7f5076ea2b25ab71d77f36a6c0d809e5350651792f80a672',
+  'uv-aarch64-apple-darwin.tar.gz': 'cfe454573412ff7380d15fc7dae5997ab53ffce72fce0a78e91ddbc84001acd2'
+}
 const PYTHON_VERSION = '3.12'
 
 // --- pure helpers ---------------------------------------------------------
@@ -66,25 +80,6 @@ export interface RunOptions {
 /** Runs a command, streaming lines; resolves the exit code. */
 export type RunFn = (cmd: string, args: string[], opts: RunOptions) => Promise<number>
 
-export interface UvRelease {
-  tag: string
-  assets: { name: string; url: string }[]
-}
-
-/** GitHub latest uv release metadata; throws with a clear message on rate limits. */
-export async function fetchUvRelease(fetchImpl: typeof fetch = fetch): Promise<UvRelease> {
-  const res = await fetchImpl(UV_RELEASE_URL, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'image-studio' } })
-  if (res.status === 403 || res.status === 429) {
-    throw new Error(`GitHub API rate limit exceeded (${res.status}). Try again later.`)
-  }
-  if (!res.ok) throw new Error(`GitHub API returned ${res.status} while fetching the latest uv release.`)
-  const json = (await res.json()) as { tag_name?: string; assets?: { name?: string; browser_download_url?: string }[] }
-  const assets = (json.assets ?? [])
-    .filter((a): a is { name: string; browser_download_url: string } => typeof a.name === 'string' && typeof a.browser_download_url === 'string')
-    .map((a) => ({ name: a.name, url: a.browser_download_url }))
-  return { tag: json.tag_name ?? '', assets }
-}
-
 async function downloadToFile(
   url: string,
   dest: string,
@@ -125,12 +120,6 @@ async function sha256File(p: string): Promise<string> {
   return createHash('sha256').update(await fs.readFile(p)).digest('hex')
 }
 
-/** Expected checksum from a `<asset>.sha256` file (sha256sum style: `<hex>  <name>`). */
-function parseChecksumFile(text: string): string | null {
-  const token = text.trim().split(/\s+/)[0] ?? ''
-  return /^[a-fA-F0-9]{64}$/.test(token) ? token.toLowerCase() : null
-}
-
 /** Breadth-first search for a file of the given name inside `dir`. */
 async function findFile(dir: string, fileName: string): Promise<string | null> {
   const queue: string[] = [dir]
@@ -152,21 +141,22 @@ async function findFile(dir: string, fileName: string): Promise<string | null> {
 
 // --- verify snippet ---------------------------------------------------------
 
+const VERIFY_TORCH_EXIT = 2
 const VERIFY_DIFFUSERS_EXIT = 3
 
-/** Imported torch + diffusers, printed as one JSON line (stdout/code 0), or exit 3 when diffusers is broken. */
+/** Imports torch then diffusers, printed as one JSON line (stdout/code 0), exit 2 on a broken torch import, exit 3 on a broken diffusers import. CUDA unavailable is not a failure. */
 const VERIFY_SNIPPET = [
   'import json, sys',
+  'try:',
+  '    import torch',
+  'except Exception:',
+  "    sys.stderr.write('torch cannot be imported\\n')",
+  `    sys.exit(${VERIFY_TORCH_EXIT})`,
   'try:',
   '    import diffusers',
   'except Exception:',
   "    sys.stderr.write('diffusers cannot be imported\\n')",
   `    sys.exit(${VERIFY_DIFFUSERS_EXIT})`,
-  'try:',
-  '    import torch',
-  'except Exception:',
-  "    print(json.dumps({'torch': '', 'diffusers': diffusers.__version__, 'cuda': False, 'device': ''}))",
-  '    sys.exit(0)',
   'cuda = torch.cuda.is_available()',
   "device = torch.cuda.get_device_name(0) if cuda else ''",
   "print(json.dumps({'torch': torch.__version__, 'diffusers': diffusers.__version__, 'cuda': bool(cuda), 'device': device}))"
@@ -219,24 +209,35 @@ export interface InstallRuntimeOptions {
   run: RunFn
   fetchImpl?: typeof fetch
   onProgress?: (p: RuntimeInstallProgress) => void
-  /** Pre-downloaded uv archive (skips the GitHub lookup, download and checksum). */
+  /** Pre-downloaded uv archive (skips the download and checksum). */
   uvArchivePath?: string
+  /** Test hook overriding fs.rename in the venv swap. */
+  renameImpl?: (from: string, to: string) => Promise<void>
+  /** Test hook replacing the embedded pinned checksums. */
+  uvChecksums?: Record<string, string>
 }
 
-let installInFlight = false
+/** One install or removal at a time, module-wide (they must not race). */
+let operationInFlight: 'install' | 'remove' | null = null
+
+/** True while an install or removal runs, for the UI busy state. */
+export function runtimeBusy(): boolean {
+  return operationInFlight !== null
+}
 
 /**
  * Installs the managed diffusers runtime into `root` (uv → python → staging
- * venv → torch → packages → verify → atomic swap + state.json). Only one
- * install may run at a time; a second concurrent call rejects.
+ * venv → torch → packages → verify → swap + state.json). Only one install or
+ * removal may run at a time; a concurrent operation rejects.
  */
 export async function installRuntimeCore(opts: InstallRuntimeOptions): Promise<RuntimeState> {
-  if (installInFlight) throw new Error('An install is already running.')
-  installInFlight = true
+  if (operationInFlight === 'install') throw new Error('An install is already running.')
+  if (operationInFlight === 'remove') throw new Error('A removal is running — wait for it to finish.')
+  operationInFlight = 'install'
   try {
     return await doInstall(opts)
   } finally {
-    installInFlight = false
+    operationInFlight = null
   }
 }
 
@@ -261,20 +262,14 @@ async function doInstall(opts: InstallRuntimeOptions): Promise<RuntimeState> {
       const assetName = opts.uvArchivePath ? '' : uvAssetName(platform, arch)
       if (!opts.uvArchivePath) {
         if (!assetName) throw new Error(`No uv release asset for ${platform}/${arch}.`)
-        const release = await fetchUvRelease(opts.fetchImpl ?? fetch)
-        const asset = release.assets.find((a) => a.name === assetName)
-        if (!asset) throw new Error(`Latest uv release (${release.tag || 'unknown'}) has no asset "${assetName}".`)
+        const checksums = opts.uvChecksums ?? UV_CHECKSUMS
+        const expected = checksums[assetName]
+        if (!expected) throw new Error(`No pinned uv checksum for asset "${assetName}".`)
         const archivePath = path.join(tmpDir, assetName)
-        await downloadToFile(asset.url, archivePath, opts.fetchImpl ?? fetch, (received, total) =>
+        await downloadToFile(uvReleaseUrl(assetName), archivePath, opts.fetchImpl ?? fetch, (received, total) =>
           report({ phase: 'uv', received, total })
         )
-        // uv publishes <asset>.sha256 next to each asset — verify before extracting.
-        const shaAsset = release.assets.find((a) => a.name === `${assetName}.sha256`)
-        if (!shaAsset) throw new Error(`Latest uv release has no checksum asset "${assetName}.sha256".`)
-        const shaPath = path.join(tmpDir, `${assetName}.sha256`)
-        await downloadToFile(shaAsset.url, shaPath, opts.fetchImpl ?? fetch)
-        const expected = parseChecksumFile(await fs.readFile(shaPath, 'utf8'))
-        if (!expected) throw new Error('Could not parse the uv checksum file.')
+        // Verify against the embedded checksum before extracting anything.
         const actual = await sha256File(archivePath)
         if (actual !== expected) {
           throw new Error(`uv archive checksum mismatch: expected ${expected}, got ${actual} — aborting before extraction.`)
@@ -347,6 +342,9 @@ async function doInstall(opts: InstallRuntimeOptions): Promise<RuntimeState> {
       }
     })
     if (verifyCode !== 0) {
+      if (verifyCode === VERIFY_TORCH_EXIT) {
+        throw new Error('Runtime verification failed: torch cannot be imported.')
+      }
       if (verifyCode === VERIFY_DIFFUSERS_EXIT) {
         throw new Error('Runtime verification failed: diffusers cannot be imported.')
       }
@@ -361,14 +359,27 @@ async function doInstall(opts: InstallRuntimeOptions): Promise<RuntimeState> {
   }
   if (!summary) throw new Error('Runtime verification did not print the expected JSON summary.')
 
-  // 7. atomic swap + state.json
+  // 7. swap the verified staging venv in, keeping the old one until it succeeds:
+  // venv → venv.old, staging → venv, and venv.old back if the last rename fails.
+  const rename = opts.renameImpl ?? ((a: string, b: string) => fs.rename(a, b))
+  const oldVenv = path.join(root, 'venv.old')
+  await fs.rm(oldVenv, { recursive: true, force: true })
+  const hadVenv = await exists(venvDir)
+  if (hadVenv) {
+    try {
+      await rename(venvDir, oldVenv)
+    } catch (err) {
+      await fs.rm(stagingVenv, { recursive: true, force: true })
+      throw err
+    }
+  }
   try {
-    await fs.rm(venvDir, { recursive: true, force: true })
-    await fs.rename(stagingVenv, venvDir)
+    await rename(stagingVenv, venvDir)
   } catch (err) {
-    await fs.rm(stagingVenv, { recursive: true, force: true })
+    if (hadVenv) await rename(oldVenv, venvDir).catch(() => undefined)
     throw err
   }
+  if (hadVenv) await fs.rm(oldVenv, { recursive: true, force: true })
   const state: RuntimeState = {
     requirementsSha256: await sha256File(requirementsPath),
     installedAt: new Date().toISOString(),
@@ -424,7 +435,7 @@ export async function runtimeInfo(
   const pythonPath = pythonPathIn(path.join(root, 'venv'), platform)
   try {
     if (!(await exists(pythonPath))) {
-      return { supported, installed: false, outdated: false, pythonPath: null }
+      return { supported, installed: false, outdated: false, pythonPath: null, busy: runtimeBusy() }
     }
     const state = JSON.parse(await fs.readFile(path.join(root, 'state.json'), 'utf8')) as RuntimeState
     let sha = ''
@@ -438,6 +449,7 @@ export async function runtimeInfo(
       supported,
       installed: true,
       outdated,
+      busy: runtimeBusy(),
       pythonPath,
       ...(state.torchVersion ? { torchVersion: state.torchVersion } : {}),
       ...(state.diffusersVersion ? { diffusersVersion: state.diffusersVersion } : {}),
@@ -446,16 +458,26 @@ export async function runtimeInfo(
       sizeBytes: await runtimeSizeBytes(root)
     }
   } catch {
-    return { supported, installed: false, outdated: false, pythonPath: null }
+    return { supported, installed: false, outdated: false, pythonPath: null, busy: runtimeBusy() }
   }
 }
 
 /** Removes the managed runtime dir; refuses anything not named diffusers-runtime. */
-export async function removeRuntime(root: string): Promise<void> {
+export async function removeRuntime(
+  root: string,
+  removeImpl: (p: string, opts: { recursive: boolean; force: boolean }) => Promise<void> = fs.rm
+): Promise<void> {
   if (!root.endsWith('diffusers-runtime')) {
     throw new Error(`Refusing to remove "${root}": not the diffusers runtime directory.`)
   }
-  await fs.rm(root, { recursive: true, force: true })
+  if (operationInFlight === 'install') throw new Error('An install is running — wait for it to finish.')
+  if (operationInFlight === 'remove') throw new Error('A removal is already running.')
+  operationInFlight = 'remove'
+  try {
+    await removeImpl(root, { recursive: true, force: true })
+  } finally {
+    operationInFlight = null
+  }
 }
 
 // --- electron-dependent wrappers -------------------------------------------
