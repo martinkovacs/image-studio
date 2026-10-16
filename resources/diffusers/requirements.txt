@@ -1,0 +1,16 @@
+# Python packages for the managed diffusers inference server.
+# torch + torchvision are installed separately, with the CUDA 12.8 backend
+# (uv pip install --torch-backend=cu128), before this file is applied.
+# QwenImage21Pipeline, Flux2Pipeline and Flux2KleinPipeline ship in diffusers 0.41;
+# Qwen3-VL (Qwen-Image 2.1's text encoder) needs transformers 5.17+.
+diffusers>=0.41
+transformers>=5.17
+accelerate>=1.10
+safetensors>=0.6
+gguf>=0.17
+bitsandbytes>=0.48
+peft>=0.17
+sentencepiece
+protobuf
+pillow>=11
+huggingface_hub>=0.35

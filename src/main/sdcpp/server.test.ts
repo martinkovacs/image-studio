@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import net from 'node:net'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { SdImgGenBody } from '@shared/types'
+import { sdcppLaunch, type LaunchSpec } from '../backends/launch'
 import {
   OutputLineSplitter,
   SdServer,
@@ -268,10 +269,14 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
   let fakeScript: string
   let tmpDir: string
   const spawned: ChildProcess[] = []
+  const spawnCalls: { cmd: string; args: readonly string[]; opts: SpawnOptions }[] = []
   const servers: SdServer[] = []
   const savedEnv: Record<string, string | undefined> = {}
 
   const fakeSpawnImpl = (): SpawnImpl => (cmd, args, opts) => {
+    spawnCalls.push({ cmd, args, opts })
+    // The fake sd-server is a node script; whatever backend command the launch
+    // spec names is replaced by process.execPath + the script.
     const child = spawn(process.execPath, [fakeScript, ...args], opts)
     spawned.push(child)
     return child
@@ -284,6 +289,7 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
       await fs.writeFile(fakeScript, FAKE_SD_SERVER_SCRIPT)
     }
     spawned.length = 0
+    spawnCalls.length = 0
   })
 
   afterEach(async () => {
@@ -314,20 +320,51 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
     return server
   }
 
+  /** Launch spec for the fake node script, built once the script exists. */
+  const launchFor = (id: string): LaunchSpec => sdcppLaunch(fakeScript, profile(id))
+
   it('reaches ready and emits starting → ready status transitions', async () => {
     const server = newServer({ readyTimeoutMs: 15_000 })
     const events: ServerStatus[] = []
     server.on('status', (s) => events.push(s))
-    const status = await server.start(profile('p1'), fakeScript, await freePort())
+    const status = await server.start(profile('p1'), launchFor('p1'), await freePort())
     expect(status.state).toBe('ready')
     expect(status.profileId).toBe('p1')
     expect(events.map((e) => e.state)).toEqual(['starting', 'ready'])
   }, 10_000)
 
+  it('spawns launch.command with argsFor(port), cwd and merged env from the spec', async () => {
+    const server = newServer({ readyTimeoutMs: 15_000 })
+    const port = await freePort()
+    await server.start(profile('p1'), launchFor('p1'), port)
+    const call = spawnCalls[0]!
+    expect(call.cmd).toBe(fakeScript)
+    expect(call.args.slice(-4)).toEqual(['--listen-ip', '127.0.0.1', '--listen-port', String(port)])
+    expect(call.opts.cwd).toBe(path.dirname(fakeScript))
+    expect((call.opts.env as NodeJS.ProcessEnv).LD_LIBRARY_PATH?.split(':')[0]).toBe(path.dirname(fakeScript))
+    expect((call.opts.env as NodeJS.ProcessEnv).PATH?.split(path.delimiter)[0]).toBe(path.dirname(fakeScript))
+  }, 10_000)
+
+  it('reports a clear error when a required launch file is missing', async () => {
+    const server = newServer({ readyTimeoutMs: 5000 })
+    const launch: LaunchSpec = {
+      backend: 'diffusers',
+      command: '/no/such/python',
+      argsFor: (port) => ['--listen-ip', '127.0.0.1', '--listen-port', String(port)],
+      cwd: tmpDir,
+      label: 'diffusers server',
+      requiredFiles: ['/no/such/python', '/also/missing/server.py']
+    }
+    const st = await server.start(profile('p1'), launch, await freePort())
+    expect(st.state).toBe('error')
+    expect(st.error).toBe('diffusers server not found at /no/such/python')
+    expect(spawned).toHaveLength(0)
+  })
+
   it('already ready with the same profile: start() returns immediately, no new process', async () => {
     const server = newServer({ readyTimeoutMs: 15_000 })
-    await server.start(profile('p1'), fakeScript, await freePort())
-    expect((await server.start(profile('p1'), fakeScript, await freePort())).state).toBe('ready')
+    await server.start(profile('p1'), launchFor('p1'), await freePort())
+    expect((await server.start(profile('p1'), launchFor('p1'), await freePort())).state).toBe('ready')
     expect(spawned).toHaveLength(1)
   }, 10_000)
 
@@ -335,8 +372,8 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
     saveEnv('FAKE_SD_READY_DELAY_MS', '400')
     const server = newServer({ readyTimeoutMs: 15_000 })
     const [a, b] = await Promise.all([
-      server.start(profile('p1'), fakeScript, await freePort()),
-      server.start(profile('p1'), fakeScript, await freePort())
+      server.start(profile('p1'), launchFor('p1'), await freePort()),
+      server.start(profile('p1'), launchFor('p1'), await freePort())
     ])
     expect(a.state).toBe('ready')
     expect(b).toEqual(a)
@@ -348,9 +385,9 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
     saveEnv('FAKE_SD_EXIT_MESSAGE', 'fatal: cannot load model\nfatal: aborting\n')
     const server = newServer({ readyTimeoutMs: 60_000 })
     const started = Date.now()
-    const status = await server.start(profile('p1'), fakeScript, await freePort())
+    const status = await server.start(profile('p1'), launchFor('p1'), await freePort())
     expect(status.state).toBe('error')
-    expect(status.error).toContain('exited while starting')
+    expect(status.error).toContain('sd-server exited while starting')
     expect(status.error).toContain('fatal: cannot load model')
     expect(Date.now() - started).toBeLessThan(10_000)
   }, 10_000)
@@ -358,7 +395,7 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
   it('stop() during an in-flight start wins: state stopped, resolves after the child exited', async () => {
     saveEnv('FAKE_SD_READY_DELAY_MS', '15000')
     const server = newServer({ readyTimeoutMs: 60_000 })
-    const startPromise = server.start(profile('p1'), fakeScript, await freePort())
+    const startPromise = server.start(profile('p1'), launchFor('p1'), await freePort())
     await onceState(server, 'starting')
     const stopStatus = await server.stop()
     expect(stopStatus.state).toBe('stopped')
@@ -370,7 +407,7 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
     saveEnv('FAKE_SD_READY_DELAY_MS', '15000')
     const server = newServer({ readyTimeoutMs: 60_000 })
     const controller = new AbortController()
-    const startPromise = server.start(profile('p1'), fakeScript, await freePort(), { signal: controller.signal })
+    const startPromise = server.start(profile('p1'), launchFor('p1'), await freePort(), { signal: controller.signal })
     await onceState(server, 'starting')
     controller.abort()
     await expect(startPromise).rejects.toMatchObject({ name: 'AbortError' })
@@ -381,7 +418,7 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
   it('aborting the signal after start() resolved does not stop the loaded server', async () => {
     const server = newServer({ readyTimeoutMs: 15_000 })
     const controller = new AbortController()
-    const status = await server.start(profile('p1'), fakeScript, await freePort(), { signal: controller.signal })
+    const status = await server.start(profile('p1'), launchFor('p1'), await freePort(), { signal: controller.signal })
     expect(status.state).toBe('ready')
     // generate.ts reuses the job's signal for imgGen; cancelling that job must not unload the model.
     controller.abort()
@@ -393,7 +430,7 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
   it('start immediately followed by stop never spawns (superseded while queued)', async () => {
     saveEnv('FAKE_SD_READY_DELAY_MS', '15000')
     const server = newServer({ readyTimeoutMs: 60_000 })
-    const startPromise = server.start(profile('p1'), fakeScript, await freePort())
+    const startPromise = server.start(profile('p1'), launchFor('p1'), await freePort())
     const began = Date.now()
     const stopStatus = await server.stop()
     await startPromise
@@ -404,9 +441,9 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
 
   it('a same-profile start after a pending stop restarts instead of reporting the dying instance', async () => {
     const server = newServer({ readyTimeoutMs: 15_000 })
-    await server.start(profile('p1'), fakeScript, await freePort())
+    await server.start(profile('p1'), launchFor('p1'), await freePort())
     const stopping = server.stop()
-    const restarted = await server.start(profile('p1'), fakeScript, await freePort())
+    const restarted = await server.start(profile('p1'), launchFor('p1'), await freePort())
     await stopping
     expect(restarted.state).toBe('ready')
     expect(server.status().state).toBe('ready')
@@ -417,10 +454,10 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
   it('a caller joining an in-flight start can abort without stopping the shared load', async () => {
     saveEnv('FAKE_SD_READY_DELAY_MS', '400')
     const server = newServer({ readyTimeoutMs: 15_000 })
-    const owner = server.start(profile('p1'), fakeScript, await freePort())
+    const owner = server.start(profile('p1'), launchFor('p1'), await freePort())
     await onceState(server, 'starting')
     const controller = new AbortController()
-    const joiner = server.start(profile('p1'), fakeScript, await freePort(), { signal: controller.signal })
+    const joiner = server.start(profile('p1'), launchFor('p1'), await freePort(), { signal: controller.signal })
     controller.abort()
     await expect(joiner).rejects.toMatchObject({ name: 'AbortError' })
     expect((await owner).state).toBe('ready')
@@ -431,18 +468,18 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
     const controller = new AbortController()
     controller.abort()
     const server = newServer({ readyTimeoutMs: 5000 })
-    await expect(server.start(profile('p1'), fakeScript, await freePort(), { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(server.start(profile('p1'), launchFor('p1'), await freePort(), { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
     expect(spawned).toHaveLength(0)
   })
 
   it('a start for a different profile serializes: the first start aborts, the second wins', async () => {
     saveEnv('FAKE_SD_READY_DELAY_MS', '15000')
     const server = newServer({ readyTimeoutMs: 60_000 })
-    const first = server.start(profile('a'), fakeScript, await freePort())
+    const first = server.start(profile('a'), launchFor('a'), await freePort())
     await onceState(server, 'starting')
     // Only the first (long-loading) instance is slowed down; read per-request.
     saveEnv('FAKE_SD_READY_DELAY_MS', '100')
-    const second = server.start(profile('b'), fakeScript, await freePort())
+    const second = server.start(profile('b'), launchFor('b'), await freePort())
     const stB = await second
     expect(stB.state).toBe('ready')
     expect(stB.profileId).toBe('b')
@@ -455,7 +492,7 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
 
   it('reports a clear error when all 200 probed ports are busy', async () => {
     const server = new SdServer({ portProbeImpl: async () => false, readyTimeoutMs: 5000 })
-    const st = await server.start(profile('p1'), fakeScript, 40000)
+    const st = await server.start(profile('p1'), launchFor('p1'), 40000)
     expect(st.state).toBe('error')
     expect(st.error).toMatch(/no free port/)
     expect(spawned).toHaveLength(0) // never spawns
@@ -464,7 +501,7 @@ describe('SdServer lifecycle (fake sd-server process)', () => {
   it('wait-ready timeout kills the child and lands on error (no leaked process)', async () => {
     saveEnv('FAKE_SD_READY_DELAY_MS', '30000')
     const server = newServer({ readyTimeoutMs: 1200 })
-    const st = await server.start(profile('p1'), fakeScript, await freePort())
+    const st = await server.start(profile('p1'), launchFor('p1'), await freePort())
     expect(st.state).toBe('error')
     expect(st.error).toContain('timed out')
     expect(isGone(spawned[0])).toBe(true)

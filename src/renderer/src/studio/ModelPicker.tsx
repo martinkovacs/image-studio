@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { Cloud, Cpu, Loader2, Play, RefreshCw, Square } from 'lucide-react'
-import type { ProviderId } from '@shared/types'
+import { profileBackend, type ProviderId } from '@shared/types'
 import { activeProfile, useStore } from '../store'
 import { Button, Combobox, cx, Segmented, Select } from '../components/ui'
 import { SLIM } from '../lib/edition'
@@ -81,26 +81,29 @@ export function LocalModelSelect({ compact }: { compact?: boolean }) {
   const profile = useStore(activeProfile)
   const updateSettings = useStore((s) => s.updateSettings)
   const showError = useStore((s) => s.showError)
-  const setView = useStore((s) => s.setView)
-  const profiles = settings.local.profiles
+  const openSettings = useStore((s) => s.openSettings)
+  const effective = useStore((s) => s.backendInfo?.effective ?? 'sdcpp')
+  // Only profiles of the backend in use (plus the active one, so a selection never silently vanishes).
+  const profiles = settings.local.profiles.filter((p) => profileBackend(p) === effective || p.id === settings.local.activeProfileId)
 
   if (profiles.length === 0) {
     if (compact) {
       return (
-        <Button size="sm" className="h-8 w-full" onClick={() => setView('settings')}>
-          Set up local models
+        <Button size="sm" className="h-8 w-full" onClick={() => openSettings('browser')}>
+          Get a local model
         </Button>
       )
     }
     return (
       <div className="rounded-md border border-dashed border-ink-700 p-3 text-xs leading-relaxed text-ink-400">
-        No local model profiles yet. A profile points sd.cpp at your model files.
-        <Button size="sm" className="mt-2 w-full" onClick={() => setView('settings')}>
-          Set up local models
+        No local models for {effective === 'diffusers' ? 'diffusers' : 'stable-diffusion.cpp'} yet. The model browser downloads a supported model and sets it up.
+        <Button size="sm" className="mt-2 w-full" onClick={() => openSettings('browser')}>
+          Open model browser
         </Button>
       </div>
     )
   }
+  const mismatch = profile && profileBackend(profile) !== effective
 
   const running = status.profileId === profile?.id && status.state !== 'stopped'
   const start = async () => {
@@ -143,6 +146,11 @@ export function LocalModelSelect({ compact }: { compact?: boolean }) {
         {status.state === 'stopped' && <span>not loaded · loads on first generate</span>}
         {status.state === 'error' && <span className="truncate text-stop">{status.error?.split('\n')[0] ?? 'error'}</span>}
       </div>
+      {mismatch && !compact && (
+        <p className="text-[11px] leading-snug text-safelight">
+          This profile uses {profileBackend(profile) === 'diffusers' ? 'diffusers' : 'stable-diffusion.cpp'}, not the selected backend.
+        </p>
+      )}
     </div>
   )
 }

@@ -18,7 +18,8 @@ const api: StudioApi = {
     setOpenRouterKey: (key) => invoke('settings:setOpenRouterKey', key),
     chooseOutputDir: () => invoke('settings:chooseOutputDir'),
     chooseServerBinary: () => invoke('settings:chooseServerBinary'),
-    pickPath: (opts) => invoke('settings:pickPath', opts)
+    pickPath: (opts) => invoke('settings:pickPath', opts),
+    onChanged: (cb) => subscribe('settings:changed', cb)
   },
   openrouter: {
     listModels: (force) => invoke('openrouter:listModels', force),

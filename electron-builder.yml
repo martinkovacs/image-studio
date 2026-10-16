@@ -10,8 +10,10 @@ artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 files:
   - out/**
   - package.json
-  # The sd.cpp engine ships as extraResources only — never inside the asar.
+  # The sd.cpp engine and the diffusers server ship as extraResources only —
+  # never inside the asar.
   - '!resources/sdcpp/**'
+  - '!resources/diffusers/**'
 
 # No native node dependencies to rebuild against Electron's ABI.
 npmRebuild: false
@@ -27,6 +29,13 @@ extraResources:
       # ship inside the packaged app.
       - '**/*'
       - '!**/.*'
+  # The diffusers server script + requirements; the Python runtime itself is
+  # installed on demand into userData (see src/main/diffusers/runtime.ts).
+  - from: resources/diffusers
+    to: diffusers
+    filter:
+      - 'server.py'
+      - 'requirements.txt'
 
 linux:
   target:

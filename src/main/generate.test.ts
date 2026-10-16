@@ -12,10 +12,12 @@ import {
 } from './generate'
 import { generateImages } from './openrouter'
 import { HistoryStore } from './history'
+import type { LaunchSpec } from './backends/launch'
 import type {
   AppSettings,
   GenerationProgress,
   HistoryItem,
+  LocalModelProfile,
   SdImgGenBody,
   ServerStatus,
 } from '../shared/types'
@@ -82,7 +84,7 @@ function webpLossyBytes(width: number, height: number): Buffer {
 
 class FakeServer extends EventEmitter implements SdServerLike {
   statusValue: ServerStatus = { state: 'stopped', profileId: null, port: null }
-  startedWith: { profile: unknown; serverPath: string; port: number; signal?: AbortSignal }[] = []
+  startedWith: { profile: LocalModelProfile; launch: LaunchSpec; port: number; signal?: AbortSignal }[] = []
   startedCount = 0
   imgGenBodies: SdImgGenBody[] = []
   upscaleCalls: { body: { image: string }; signal?: AbortSignal }[] = []
@@ -109,14 +111,14 @@ class FakeServer extends EventEmitter implements SdServerLike {
     return this.statusValue
   }
   async start(
-    profile: any,
-    serverPath: string,
+    profile: LocalModelProfile,
+    launch: LaunchSpec,
     port: number,
     opts?: { signal?: AbortSignal },
   ): Promise<ServerStatus> {
     this.startedCount++
-    this.startedWith.push({ profile, serverPath, port, signal: opts?.signal })
-    this.statusValue = { state: 'ready', profileId: (profile as { id: string }).id, port }
+    this.startedWith.push({ profile, launch, port, signal: opts?.signal })
+    this.statusValue = { state: 'ready', profileId: profile.id, port }
     return this.statusValue
   }
   imgGen(
@@ -148,6 +150,16 @@ class FakeServer extends EventEmitter implements SdServerLike {
 const okResponse = (payload: unknown): Response =>
   new Response(JSON.stringify(payload), { status: 200 })
 
+/** Launch spec handed to the fake server; generate.ts must pass it through untouched. */
+const FAKE_LAUNCH: LaunchSpec = {
+  backend: 'sdcpp',
+  command: '/fake/sd-server',
+  argsFor: (port) => ['--listen-ip', '127.0.0.1', '--listen-port', String(port)],
+  cwd: '/fake',
+  label: 'sd-server',
+  requiredFiles: ['/fake/sd-server'],
+}
+
 function settingsWith(outputDir: string): AppSettings {
   return {
     uiMode: 'studio',
@@ -155,7 +167,10 @@ function settingsWith(outputDir: string): AppSettings {
     theme: 'dark',
     outputDir,
     openrouter: { hasApiKey: true, defaultModel: 'google/gemini-2.5-flash-image' },
+    huggingface: { hasToken: false },
     local: {
+      backend: 'auto',
+      modelsDir: '/tmp/x',
       engineVariant: 'linux-cpu',
       customServerPath: '',
       activeProfileId: 'p1',
@@ -202,7 +217,9 @@ describe('generate (openrouter)', () => {
       getSettings: () => settingsWith(dir),
       getApiKey: () => 'sk-test',
       server: new FakeServer(),
-      resolveServerPath: async () => null,
+      resolveLaunch: async () => {
+        throw new Error('resolveLaunch must not be called for openrouter jobs')
+      },
       history,
       emitProgress: (p) => progress.push(p),
     })
@@ -241,7 +258,9 @@ describe('generate (openrouter)', () => {
       getSettings: () => settingsWith(dir),
       getApiKey: () => null,
       server: new FakeServer(),
-      resolveServerPath: async () => null,
+      resolveLaunch: async () => {
+        throw new Error('resolveLaunch must not be called for openrouter jobs')
+      },
       history,
       emitProgress: () => undefined,
     })
@@ -279,7 +298,7 @@ describe('generate (local)', () => {
       getSettings: () => settingsWith(dir),
       getApiKey: () => 'sk-test',
       server,
-      resolveServerPath: async () => '/fake/sd-server',
+      resolveLaunch: async () => FAKE_LAUNCH,
       history,
       emitProgress: (p: GenerationProgress) => progress.push(p),
     }
@@ -308,7 +327,7 @@ describe('generate (local)', () => {
     expect(server.startedWith).toEqual([
       {
         profile: { id: 'p1', name: 'SD 1.5 CPU', args: {}, extraArgs: '' },
-        serverPath: '/fake/sd-server',
+        launch: expect.objectContaining({ command: '/fake/sd-server', backend: 'sdcpp' }),
         port: 7860,
         signal: expect.any(AbortSignal),
       },
@@ -386,21 +405,34 @@ describe('generate (local)', () => {
     expect(result.ok).toBe(true)
     const queued = progress.filter((p) => p.jobId === 'jobQ' && p.stage === 'queued')
     expect(queued).toHaveLength(1)
-    expect(queued[0]!.message).toBe('Waiting in sd-server queue (position 3)')
+    expect(queued[0]!.message).toBe('Waiting in local engine queue (position 3)')
   })
 
   it('passing signal into server.start (ensureServerRunning)', async () => {
     const { createGenerator } = await import('./generate')
     const server = new FakeServer()
-    server.start = async (profile, serverPath, port, opts) => {
+    server.start = async (profile, launch, port, opts) => {
       void server.startedCount++
-      server.startedWith.push({ profile, serverPath, port, signal: opts?.signal })
-      server.statusValue = { state: 'ready', profileId: (profile as { id: string }).id, port }
+      server.startedWith.push({ profile, launch, port, signal: opts?.signal })
+      server.statusValue = { state: 'ready', profileId: profile.id, port }
       return server.statusValue
     }
     const g = createGenerator(makeDeps(server))
     await g.run('jobS', { provider: 'local', prompt: 'p', inputs: { refImages: [] } })
     expect(server.startedWith[0]!.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('surfaces resolveLaunch failures as a job error', async () => {
+    const { createGenerator } = await import('./generate')
+    const g = createGenerator({
+      ...makeDeps(new FakeServer()),
+      resolveLaunch: async () => {
+        throw new Error('Diffusers runtime is not installed — install it in Settings')
+      },
+    })
+    const result = await g.run('jobE', { provider: 'local', prompt: 'p', inputs: { refImages: [] } })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toBe('Diffusers runtime is not installed — install it in Settings')
   })
 
   it('reports a non-interruptible cancellation when the server could not abort', async () => {
@@ -426,7 +458,7 @@ describe('generate (local)', () => {
       jobId: 'jobI',
       cancelled: true,
       error:
-        'Cancelled — sd-server cannot interrupt a running generation, so it finishes in the background and the result is discarded.',
+        'Cancelled — the local engine cannot interrupt a running generation, so it finishes in the background and the result is discarded.',
     })
   })
 

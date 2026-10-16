@@ -7,7 +7,7 @@ import type { LaunchFlag } from './sdcppFlags'
  * Pipeline classes the diffusers server is allowed to instantiate. Keep in sync
  * with PIPELINES in resources/diffusers/server.py.
  */
-export const DIFFUSERS_PIPELINES = ['QwenImagePipeline', 'QwenImageEditPlusPipeline', 'Flux2Pipeline', 'Flux2KleinPipeline'] as const
+export const DIFFUSERS_PIPELINES = ['QwenImage21Pipeline', 'Flux2Pipeline', 'Flux2KleinPipeline'] as const
 export type DiffusersPipeline = (typeof DIFFUSERS_PIPELINES)[number]
 
 export const DIFFUSERS_LAUNCH_FLAGS: LaunchFlag[] = [

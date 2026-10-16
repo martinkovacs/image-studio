@@ -1,6 +1,6 @@
 # Image Studio
 
-Electron image generation & editing studio. Two providers: **OpenRouter** (cloud) and **stable-diffusion.cpp** (local, bundled `sd-server`).
+Electron image generation & editing studio. Two providers: **OpenRouter** (cloud) and **local** — with two local backends, like Unsloth Studio: Hugging Face **diffusers** on NVIDIA GPUs and **stable-diffusion.cpp** everywhere else.
 
 - **Studio UI** (default): generation / edit / inpaint panels with a simple and an advanced detail level.
 - **Chat UI** (optional): threaded conversational interface; toggle in **Settings → General**.
@@ -8,7 +8,29 @@ Electron image generation & editing studio. Two providers: **OpenRouter** (cloud
 Providers:
 
 - **OpenRouter** — Unified Image API: `POST /api/v1/images` for generation, `GET /api/v1/images/models` for the model list.
-- **Local** — stable-diffusion.cpp's `sd-server` via its native async API (`POST /sdcpp/v1/img_gen`), spawned from a launch profile.
+- **Local** — a local server spawned from a launch profile and driven through stable-diffusion.cpp's native async API (`POST /sdcpp/v1/img_gen`). The backend is either sd.cpp's own `sd-server` or the bundled diffusers server (`resources/diffusers/server.py`), which speaks the same API.
+
+## Local backends
+
+| | diffusers | stable-diffusion.cpp |
+| --- | --- | --- |
+| Runs on | NVIDIA GPUs, Linux/Windows x64 | Vulkan, CUDA, ROCm, Metal, CPU |
+| Runtime | managed Python env in `userData/diffusers-runtime` (uv, Python 3.12, PyTorch cu128, `requirements.txt`), installed from Settings → Local engine | `sd-server` binary (bundled or downloaded) |
+| Weights | diffusers repos (safetensors only), optional GGUF transformer, bitsandbytes text-encoder quantization, LoRA | GGUF / safetensors files |
+
+**Settings → Local engine → Backend** picks *Auto* (diffusers when `nvidia-smi` reports an NVIDIA GPU with ≥ 6 GB, sd.cpp otherwise) or forces either backend. Each profile belongs to one backend; the studio lists the profiles of the backend in use.
+
+The diffusers server never loads pickled weights (`use_safetensors=True`), never runs repo code (`trust_remote_code` off, `model_index.json` components must come from `diffusers`/`transformers`), runs with `HF_HUB_OFFLINE=1` and only listens on 127.0.0.1. Its tests run without torch: `cd resources/diffusers && python3 -I -m unittest test_server -v`.
+
+## Model browser
+
+**Settings → Model browser**:
+
+- **Supported models** — one-click installs: every file a model needs for the chosen backend (quant picker per GGUF component, size and VRAM-fit badges), then a ready profile with the recommended sampling settings.
+- **Search Hugging Face** — search GGUF / diffusers repos; GGUF files are grouped by quant (split files and Unsloth `UD-` quants included), diffusers repos download as a pipeline folder (optionally without the transformer, to pair with a GGUF).
+- **Downloaded** — local repos (`<models folder>/<owner>/<repo>`), resumable downloads with sha256 verification, delete / reveal / new profile.
+
+A Hugging Face token (Settings → Hugging Face, encrypted with `safeStorage`, only sent to `huggingface.co`) is needed for gated repos such as FLUX.2 [klein] 9B.
 
 ## Model-agnostic design
 
@@ -17,17 +39,16 @@ No hand-maintained parameter table. What a model can do is read from the model i
 - OpenRouter controls are generated from each model's `supported_parameters` (as returned by the models endpoint). A parameter UI only appears when the model declares support.
 - Local sampling defaults (sampler, scheduler, steps, CFG, size, flow shift) come from the loaded model via `GET /sdcpp/v1/capabilities` (`defaults_by_mode`), not from a hard-coded table.
 
-Profile templates only pre-fill which **weight-file slots** matter for a model family:
+The only model-specific code is the **supported-model catalog** (`src/shared/catalog.ts`): the open-weights models scoring ≥ 1000 Elo on the [Artificial Analysis image-editing leaderboard](https://artificialanalysis.ai/image/leaderboard/editing?open-weights=true) that a local backend can run. Each entry lists, per backend, the Hugging Face files to fetch, the profile slots they fill, launch args and first-load sampling defaults.
 
-| Template | Slots |
-| --- | --- |
-| Qwen-Image 2.1 | diffusion-model, VAE, LLM (Qwen3-VL), LLM vision (mmproj) |
-| Qwen-Image-Edit 2511 | diffusion-model, VAE, LLM (Qwen2.5-VL), LLM vision (mmproj) |
-| Qwen-Image / Edit 2509 | diffusion-model, VAE, LLM (Qwen2.5-VL), LLM vision (mmproj) |
-| Flux.1 (dev / schnell / Kontext) | diffusion-model, VAE, CLIP-L, T5-XXL |
-| Flux.2 | diffusion-model, VAE, LLM (Mistral-Small 3.2 or Qwen3) |
-| Z-Image Turbo | diffusion-model, VAE, LLM (Qwen3-4B) |
-| SD 1.x / SDXL checkpoint | full checkpoint, VAE (optional) |
+| Model | Elo | diffusers | sd.cpp |
+| --- | --- | --- | --- |
+| Qwen-Image 2.1 (+ official Turbo) | 1083 | `QwenImage21Pipeline` + optional GGUF transformer | GGUF + Qwen3-VL GGUF + mmproj |
+| FLUX.2 [dev] Turbo (fal LoRA) | 1017 | `Flux2Pipeline` (4-bit) + Turbo LoRA | — |
+| FLUX.2 [klein] 9B | 1015 | `Flux2KleinPipeline` (gated) + optional GGUF transformer | GGUF + Qwen3 8B GGUF |
+| FLUX.2 [dev] | 1000 | `Flux2Pipeline` (4-bit) | GGUF + Mistral Small 3.2 GGUF |
+
+Not included: HunyuanImage 3.0 Instruct (1064; neither diffusers nor sd.cpp support it, ~169 GB) and FLUX.2 [dev] Flash (1014; API-only, no public weights). Any other model still works through a hand-made profile. `HF_LIVE=1 npx vitest run src/shared/catalogResolve.test.ts` checks every recipe against the live Hub.
 
 ## Resolution & 4K
 
@@ -39,7 +60,7 @@ Profile templates only pre-fill which **weight-file slots** matter for a model f
 2. Upscale via **Hires fix** (set target "4K long edge") or the **ESRGAN Upscale** tool — put ESRGAN models (e.g. `RealESRGAN_x4plus.pth`) in the profile's upscaler directory (`hires-upscalers-dir`).
 3. Enable **VAE tiling** for large decodes to avoid VRAM blowups.
 
-**Qwen-Image 2.1** notes: native presets up to 2048/side (e.g. 2752×1536 16:9, from Unsloth's table), dimensions divisible by 32. Recommended sd.cpp settings: **cfg 6, euler, 20 steps, flow shift automatic** — these are really read from the model's capabilities at runtime.
+**Qwen-Image 2.1** notes: native presets up to 2048/side (e.g. 2752×1536 16:9, from Unsloth's table), dimensions divisible by 32. Recommended settings differ per backend (Unsloth): sd.cpp **cfg 6, euler, 20 steps, flow shift automatic**; diffusers **40 steps, CFG 1**. Catalog installs apply them on first load; otherwise defaults come from the model's capabilities at runtime.
 
 ## Editions
 
@@ -61,7 +82,7 @@ npm run dev
 ```
 
 - Add your OpenRouter key in Settings. It is stored encrypted via Electron `safeStorage` and never sent to the renderer (only a `hasApiKey` flag is exposed).
-- Create a local model profile under Settings → Local (pick a template, point it at your weight files, start the server).
+- Get a local model under Settings → Model browser (or create a profile by hand under Settings → Local models). For diffusers, install its runtime under Settings → Local engine first.
 - If `ELECTRON_RUN_AS_NODE` is set in your shell, `unset ELECTRON_RUN_AS_NODE` first — it breaks Electron startup.
 
 ## Engines
@@ -78,13 +99,15 @@ npm run dev
 - Vulkan works on NVIDIA, AMD and Intel GPUs.
 - A **custom binary path** is supported (`engineVariant: "custom"` → `customServerPath`).
 
-Run without a GPU: `linux-cpu` variant. Heavy models (Flux, Qwen) typically want `offload-to-cpu` and flash attention, which is what the templates set.
+Run without a GPU: `linux-cpu` variant. Heavy models (FLUX.2, Qwen-Image) typically want `offload-to-cpu` and flash attention, which is what the catalog recipes set.
 
 ## Where things live
 
 - **Outputs**: `~/Pictures/Image Studio/YYYY-MM-DD/` — PNG/WebP images plus a `.json` sidecar per image with the full request.
 - **History index**: `userData/history/history.jsonl` (one record per generation / upscale; append-only).
-- **Settings**: `userData/settings.json` (API key here encrypted via safeStorage, not plaintext).
+- **Settings**: `userData/settings.json`; OpenRouter key and HF token are separate safeStorage-encrypted files.
+- **Downloaded models**: `userData/models/<owner>/<repo>/` by default (Settings → Hugging Face → Models folder).
+- **diffusers runtime**: `userData/diffusers-runtime/` (uv, Python, venv, caches).
 
 ## Scripts
 
@@ -102,7 +125,7 @@ Run without a GPU: `linux-cpu` variant. Heavy models (Flux, Qwen) typically want
 
 `dist:*` scripts are cross-platform wrappers (`scripts/dist.mjs`); pass extra electron-builder args straight through, e.g. `npm run dist:full -- --linux zip` or `node scripts/dist.mjs slim --win squirrel`. The full edition does **not** fetch the engine automatically — run `node scripts/fetch-sdcpp.mjs <variantId>` (e.g. `linux-vulkan`, `win-vulkan`) first. Outputs land in `release/` (gitignored).
 
-Packaging via `electron-builder`: `resources/sdcpp` is bundled as `extraResources` next to the app (full edition only; never inside the asar). Targets: Linux `zip`, Windows `squirrel` (Squirrel.Windows, needs `electron-builder-squirrel-windows`), macOS `dmg` (not built in CI).
+Packaging via `electron-builder`: `resources/sdcpp` and `resources/diffusers` (server script + requirements) are bundled as `extraResources` next to the app (full edition only; never inside the asar). Targets: Linux `zip`, Windows `squirrel` (Squirrel.Windows, needs `electron-builder-squirrel-windows`), macOS `dmg` (not built in CI).
 
 Windows icon: `scripts/make-icon.mjs` generates both `build/icon.png` (512×512, other platform icons) and `build/icon.ico` (256×256, single PNG-compressed entry). The `.ico` is used for the Windows exe (`win.icon`) and as the Squirrel installer icon (`squirrelWindows.iconUrl`).
 
@@ -121,12 +144,19 @@ npm's install-script approval (`allowScripts` in `package.json`) covers the post
 ```
 src/
   main/          Electron main process (windows, IPC, history, settings)
-    sdcpp/       sd-server lifecycle, engine variants (variants.json), capabilities proxy
+    sdcpp/       local server lifecycle (both backends), sd.cpp engine variants (variants.json)
+    backends/    launch specs: profile → sd-server / python server.py command line
+    diffusers/   managed Python runtime installer
+    hf/          Hugging Face Hub client + resumable download manager
+    hardware.ts  GPU probe + auto backend choice
+    catalog.ts   supported-model installs → profiles
   preload/       contextBridge API (window.api)
   renderer/src/
     studio/      studio UI (simple/advanced)
     chat/        chat UI
-    settings/    settings (profiles, templates.ts, API key, engine variant)
-  shared/        types.ts (main/preload/renderer contract), sdcppFlags.ts (launch flags)
-resources/sdcpp/ pre-fetched engine builds (bundled into packages)
+    settings/    settings (model browser, profiles, API key / HF token, engines)
+  shared/        types.ts (contract), sdcppFlags.ts / diffusersFlags.ts (launch flags),
+                 catalog.ts + catalogResolve.ts (supported models), quants.ts (GGUF quant parsing)
+resources/sdcpp/     pre-fetched engine builds (bundled into packages)
+resources/diffusers/ diffusers server (server.py, requirements.txt)
 ```

@@ -3,14 +3,33 @@ import { spawn } from 'node:child_process'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { IMG_PROTOCOL } from '@shared/types'
-import type { EngineInstallProgress, GenerationProgress, GenerationRequest, UpscaleRequest } from '@shared/types'
+import type {
+  AppSettings,
+  CatalogInstallRequest,
+  EngineInstallProgress,
+  GenerationProgress,
+  GenerationRequest,
+  HfDownloadRequest,
+  HfRepoDetails,
+  HfSearchOptions,
+  LocalModelProfile,
+  RuntimeInstallProgress,
+  UpscaleRequest
+} from '@shared/types'
+import { profileBackend } from '@shared/types'
 import { IS_SLIM } from '@shared/edition'
-import { getOpenRouterKey, getSettings, sanitizePatch, setOpenRouterKey, updateSettings } from './settings'
+import { getHfToken, getOpenRouterKey, getSettings, sanitizePatch, setHfToken, setOpenRouterKey, updateSettings } from './settings'
 import { getCredits, listImageModels } from './openrouter'
 import { HistoryStore } from './history'
 import { createGenerator, localDisabled, readFileAsDataUrl } from './generate'
 import { getEngineInfo, installEngine, resolveServerPath } from './sdcpp/engine'
 import { listDevices, SdServer } from './sdcpp/server'
+import { diffusersLaunch, sdcppLaunch, type LaunchSpec } from './backends/launch'
+import { chooseBackend, probeHardware } from './hardware'
+import { getRuntimeInfo, installRuntime, runtimePythonPath, runtimeRoot, serverScript, uninstallRuntime } from './diffusers/runtime'
+import { filesForDiffusersRepo, getRepoDetails, searchModels } from './hf/hub'
+import { DownloadManager } from './hf/downloads'
+import { installCatalogModel } from './catalog'
 
 /**
  * Squirrel.Windows runs the app with --squirrel-* flags during install/update/
@@ -69,11 +88,34 @@ const send = (channel: string, payload: unknown): void => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
 }
 
+/** Launch spec for a profile on its own backend; throws a user-facing error when that backend is not installed. */
+async function resolveLaunch(settings: AppSettings, profile: LocalModelProfile): Promise<LaunchSpec> {
+  if (profileBackend(profile) === 'diffusers') {
+    const pythonPath = await runtimePythonPath()
+    if (!pythonPath) throw new Error('The diffusers runtime is not installed — install it in Settings → Local engine')
+    return diffusersLaunch({ pythonPath, scriptPath: serverScript(), profile, hfHome: join(runtimeRoot(), 'hf-home') })
+  }
+  const serverPath = await resolveServerPath(settings)
+  if (!serverPath) throw new Error('No stable-diffusion.cpp engine installed — install one in Settings → Local engine')
+  return sdcppLaunch(serverPath, profile)
+}
+
+const downloads = new DownloadManager({ modelsDir: () => getSettings().local.modelsDir, token: getHfToken })
+downloads.on('progress', (p) => send('hf:progress', p))
+
+/** Repo file list (+ the diffusers pipeline subset), read with the stored token. */
+async function repoDetails(id: string): Promise<HfRepoDetails> {
+  const details = await getRepoDetails(id, { token: getHfToken() })
+  if (details.kind !== 'diffusers') return details
+  const paths = (excludeTransformer: boolean) => filesForDiffusersRepo(details, { excludeTransformer }).map((f) => f.path)
+  return { ...details, pipelineFiles: { all: paths(false), withoutTransformer: paths(true) } }
+}
+
 const generator = createGenerator({
   getSettings,
   getApiKey: getOpenRouterKey,
   server,
-  resolveServerPath,
+  resolveLaunch,
   history,
   emitProgress: (p: GenerationProgress) => send('gen:progress', p)
 })
@@ -158,16 +200,98 @@ function registerIpc(): void {
     )
   })
 
+  ipcMain.handle('backend:info', async (_e, refresh) => {
+    requireLocal()
+    return chooseBackend(await probeHardware({ refresh: refresh === true }), getSettings().local.backend)
+  })
+
+  ipcMain.handle('diffusers:info', () => {
+    requireLocal()
+    return getRuntimeInfo()
+  })
+  ipcMain.handle('diffusers:install', async () => {
+    requireLocal()
+    // The venv is replaced in place; a running diffusers server holds files open in it.
+    if (server.status().state !== 'stopped') await server.stop()
+    return installRuntime((p: RuntimeInstallProgress) => send('diffusers:progress', p))
+  })
+  ipcMain.handle('diffusers:remove', async () => {
+    requireLocal()
+    if (server.status().state !== 'stopped') await server.stop()
+    return uninstallRuntime()
+  })
+
+  ipcMain.handle('hf:setToken', (_e, token) => {
+    requireLocal()
+    return setHfToken(token === null ? null : str(token, 'token'))
+  })
+  ipcMain.handle('hf:search', (_e, opts: HfSearchOptions) => {
+    requireLocal()
+    const format = opts?.format === 'diffusers' || opts?.format === 'all' ? opts.format : 'gguf'
+    const sort = ['downloads', 'likes', 'lastModified', 'trendingScore'].includes(opts?.sort as string) ? opts.sort : 'downloads'
+    const task = opts?.task === 'text-to-image' || opts?.task === 'image-to-image' ? opts.task : null
+    const limit = Number.isInteger(opts?.limit) ? opts.limit : 30
+    return searchModels({ query: str(opts?.query ?? '', 'query').slice(0, 200), format, sort, task, limit }, { token: getHfToken() })
+  })
+  ipcMain.handle('hf:repo', (_e, id) => {
+    requireLocal()
+    return repoDetails(str(id, 'repository id'))
+  })
+  ipcMain.handle('hf:download', (_e, req: HfDownloadRequest) => {
+    requireLocal()
+    const revision = req?.revision === undefined ? undefined : str(req.revision, 'revision')
+    if (revision !== undefined && !/^[A-Za-z0-9._-]{1,100}$/.test(revision)) throw new Error('Invalid revision')
+    if (!Array.isArray(req?.files) || req.files.length === 0 || req.files.length > 2000) throw new Error('Invalid file list')
+    // enqueue validates the repo id and every path (no traversal outside the repo folder).
+    return downloads.enqueue({ repo: str(req.repo, 'repository id'), revision, files: req.files.map((f) => str(f, 'file')) })
+  })
+  ipcMain.handle('hf:cancel', (_e, id) => {
+    requireLocal()
+    downloads.cancel(str(id, 'download id'))
+  })
+  ipcMain.handle('hf:downloads', () => {
+    requireLocal()
+    return downloads.list()
+  })
+  ipcMain.handle('hf:local', () => {
+    requireLocal()
+    return downloads.scanLocal()
+  })
+  ipcMain.handle('hf:removeLocal', (_e, repo) => {
+    requireLocal()
+    return downloads.removeLocal(str(repo, 'repository id'))
+  })
+  ipcMain.handle('hf:revealLocal', async (_e, repo) => {
+    requireLocal()
+    const err = await shell.openPath(downloads.localDir(str(repo, 'repository id')))
+    if (err) throw new Error(err)
+  })
+  ipcMain.handle('hf:chooseModelsDir', async () => {
+    requireLocal()
+    const res = await dialog.showOpenDialog(win!, { title: 'Models folder', properties: ['openDirectory', 'createDirectory'] })
+    const dir = res.canceled ? undefined : res.filePaths[0]
+    return dir ? updateSettings({ local: { modelsDir: dir } }) : null
+  })
+
+  ipcMain.handle('catalog:install', (_e, req: CatalogInstallRequest) => {
+    requireLocal()
+    const backend = req?.backend === 'diffusers' ? 'diffusers' : 'sdcpp'
+    const quants = req?.quants && typeof req.quants === 'object' && !Array.isArray(req.quants) ? req.quants : {}
+    return installCatalogModel(
+      { catalogId: str(req?.catalogId, 'model'), backend, quants },
+      { downloads, repoDetails, getSettings, updateSettings, onProfileCreated: (s) => send('settings:changed', s) }
+    )
+  })
+
   ipcMain.handle('local:status', () => { requireLocal(); return server.status() })
   ipcMain.handle('local:start', async (_e, profileId) => {
     requireLocal()
     const settings = getSettings()
     const profile = settings.local.profiles.find((p) => p.id === profileId)
     if (!profile) throw new Error('Unknown model profile')
-    const path = await resolveServerPath(settings)
-    if (!path) throw new Error('No stable-diffusion.cpp engine installed — install one in Settings → Local engine')
+    const launch = await resolveLaunch(settings, profile)
     await updateSettings({ local: { activeProfileId: profile.id } })
-    return server.start(profile, path, settings.local.listenPort)
+    return server.start(profile, launch, settings.local.listenPort)
   })
   ipcMain.handle('local:stop', () => { requireLocal(); return server.stop() })
   ipcMain.handle('local:capabilities', () => { requireLocal(); return server.capabilities() })

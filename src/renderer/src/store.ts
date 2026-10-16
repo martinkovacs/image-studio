@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   AppSettings,
+  BackendInfo,
   DeepPartial,
   GenerationProgress,
   GenerationRequest,
@@ -13,6 +14,7 @@ import type {
   SdImgGenBody,
   ServerStatus
 } from '@shared/types'
+import { CATALOG_BY_ID } from '@shared/catalog'
 import { uid } from './lib/util'
 import { SLIM } from './lib/edition'
 
@@ -31,10 +33,14 @@ export interface Inputs {
 }
 
 type View = 'main' | 'settings'
+export type SettingsTab = 'general' | 'openrouter' | 'engine' | 'browser' | 'profiles' | 'huggingface' | 'log'
 
 interface State {
   settings: AppSettings | null
   view: View
+  settingsTab: SettingsTab
+  /** Hardware probe + backend choice (full edition only). */
+  backendInfo: BackendInfo | null
   provider: ProviderId
   prompt: string
   negativePrompt: string
@@ -62,6 +68,8 @@ interface Actions {
   init(): Promise<void>
   updateSettings(patch: DeepPartial<AppSettings>): Promise<void>
   setView(v: View): void
+  openSettings(tab?: SettingsTab): void
+  refreshBackend(refresh?: boolean): Promise<void>
   set<K extends keyof State>(key: K, value: State[K]): void
   setOrParam<K extends keyof OrImageParams>(key: K, value: OrImageParams[K]): void
   setOrModel(id: string): void
@@ -117,12 +125,21 @@ export function effectiveLocalParams(s: Pick<State, 'caps' | 'localParams'>): Sd
   return mergeBody(defaults, s.localParams)
 }
 
+/** Recommended per-generation settings when the active profile came from the supported-model catalog. */
+function catalogDefaults(s: Pick<State, 'settings'>, caps: SdCapabilities): SdImgGenBody | null {
+  const profile = activeProfile(s)
+  if (!profile?.catalogId) return null
+  return CATALOG_BY_ID.get(profile.catalogId)?.recipes[caps.backend ?? 'sdcpp']?.defaults ?? null
+}
+
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let initialized = false
 
 export const useStore = create<Store>((set, get) => ({
   settings: null,
   view: 'main',
+  settingsTab: 'general',
+  backendInfo: null,
   provider: SLIM ? 'openrouter' : (localStorage.getItem('provider') as ProviderId) || 'openrouter',
   prompt: '',
   negativePrompt: '',
@@ -146,6 +163,7 @@ export const useStore = create<Store>((set, get) => ({
     initialized = true
     const settings = await window.api.settings.get()
     set({ settings, orModel: localStorage.getItem('orModel') || settings.openrouter.defaultModel })
+    window.api.settings.onChanged((settings) => set({ settings }))
     window.api.gen.onProgress((p) => {
       const job = get().jobs[p.jobId]
       if (job) set({ jobs: { ...get().jobs, [p.jobId]: { ...job, progress: p } } })
@@ -159,6 +177,7 @@ export const useStore = create<Store>((set, get) => ({
     void get().loadOrModels()
     void get().refreshHistory()
     if (SLIM) return
+    void get().refreshBackend()
     const status = await window.api.local.status()
     set({ serverStatus: status })
     if (status.state === 'ready') void get().refreshCaps()
@@ -167,9 +186,14 @@ export const useStore = create<Store>((set, get) => ({
   async updateSettings(patch) {
     const settings = await window.api.settings.update(patch)
     set({ settings })
+    if (patch.local?.backend) void get().refreshBackend()
   },
 
   setView: (view) => set({ view }),
+  openSettings: (tab) => set({ view: 'settings', ...(tab ? { settingsTab: tab } : {}) }),
+  async refreshBackend(refresh) {
+    set({ backendInfo: await window.api.backend.info(refresh) })
+  },
   set: (key, value) => {
     if (key === 'provider') {
       localStorage.setItem('provider', value as string)
@@ -209,9 +233,11 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   resetLocalToDefaults() {
-    const stem = get().caps?.model.stem
-    if (stem) localStorage.removeItem(localKey(stem))
-    set({ localParams: {} })
+    const caps = get().caps
+    const seeded = caps ? catalogDefaults(get(), caps) : null
+    if (caps && seeded) localStorage.setItem(localKey(caps.model.stem), JSON.stringify(seeded))
+    else if (caps) localStorage.removeItem(localKey(caps.model.stem))
+    set({ localParams: seeded ?? {} })
   },
 
   async loadOrModels(force) {
@@ -226,7 +252,11 @@ export const useStore = create<Store>((set, get) => ({
 
   async refreshCaps() {
     const caps = await window.api.local.capabilities()
-    set({ caps, localParams: caps ? loadLocalOverrides(caps.model.stem) : {} })
+    if (!caps) return set({ caps, localParams: {} })
+    // First load of a model installed from the catalog: start from its recommended settings.
+    const seeded = localStorage.getItem(localKey(caps.model.stem)) === null ? catalogDefaults(get(), caps) : null
+    if (seeded) localStorage.setItem(localKey(caps.model.stem), JSON.stringify(seeded))
+    set({ caps, localParams: seeded ?? loadLocalOverrides(caps.model.stem) })
   },
 
   async refreshHistory() {
@@ -339,5 +369,5 @@ export const useStore = create<Store>((set, get) => ({
   }
 }))
 
-export const activeProfile = (s: State) =>
+export const activeProfile = (s: Pick<State, 'settings'>) =>
   s.settings?.local.profiles.find((p) => p.id === s.settings?.local.activeProfileId) ?? null

@@ -64,6 +64,9 @@ export function StudioView() {
   const advanced = settings.studioDetail === 'advanced'
   const model = orModels.find((m) => m.id === orModel)
   const local = provider === 'local'
+  const caps = useStore((s) => s.caps)
+  const diffusers = caps?.backend === 'diffusers'
+  const negSupported = caps?.features_by_mode.img_gen?.negative_prompt !== false
   const needsKey = provider === 'openrouter' && !settings.openrouter.hasApiKey
 
   useEffect(() => {
@@ -126,12 +129,13 @@ export function StudioView() {
               placeholder={refCount ? 'Describe the edit… e.g. "replace the sky with a stormy sunset"' : 'Describe the image…'}
             />
             {local &&
+              negSupported &&
               (showNeg ? (
                 <TextArea
                   rows={2}
                   value={negativePrompt}
                   onChange={(e) => set('negativePrompt', e.target.value)}
-                  placeholder="Negative prompt (leave blank for Qwen-Image / Flux)"
+                  placeholder="Negative prompt (usually blank for Qwen-Image and FLUX.2)"
                 />
               ) : (
                 <button onClick={() => setShowNeg(true)} className="self-start text-[11px] text-ink-400 hover:text-safelight">
@@ -155,7 +159,7 @@ export function StudioView() {
 
           <Section title="Parameters">{local ? <LocalParams advanced={advanced} /> : <OpenRouterParams model={model} />}</Section>
 
-          {local && advanced && (
+          {local && advanced && !diffusers && (
             <>
               <LoraSection />
               <HiresSection />

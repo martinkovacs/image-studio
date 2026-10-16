@@ -16,11 +16,12 @@ files:
   # The sd.cpp engine ships as extraResources only — never inside the asar
   # (the slim edition bundles none anyway, see "No extraResources" below).
   - '!resources/sdcpp/**'
+  - '!resources/diffusers/**'
 
 # No native node dependencies to rebuild against Electron's ABI.
 npmRebuild: false
 
-# No extraResources: the slim edition ships no stable-diffusion.cpp engine.
+# No extraResources: the slim edition ships no local engine (sd.cpp or diffusers).
 
 linux:
   target:

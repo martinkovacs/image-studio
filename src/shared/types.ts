@@ -323,6 +323,8 @@ export interface HfRepoDetails {
   cardExcerpt?: string
   pipelineTag?: string
   license?: string
+  /** diffusers repos: the files needed to load the pipeline locally (safetensors weights only). */
+  pipelineFiles?: { all: string[]; withoutTransformer: string[] }
 }
 
 export interface HfDownloadRequest {
@@ -500,6 +502,8 @@ export interface StudioApi {
     chooseOutputDir(): Promise<AppSettings | null>
     chooseServerBinary(): Promise<AppSettings | null>
     pickPath(opts: { kind: 'file' | 'directory'; title?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null>
+    /** Settings changed by the main process itself (e.g. a catalog install added a profile). */
+    onChanged(cb: (s: AppSettings) => void): () => void
   }
   openrouter: {
     listModels(force?: boolean): Promise<OrImageModel[]>
@@ -536,7 +540,11 @@ export interface StudioApi {
     chooseModelsDir(): Promise<AppSettings | null>
   }
   catalog: {
-    /** Starts downloading a supported model; a profile is created when every file is present. Resolves with the download id. */
+    /**
+     * Starts downloading a supported model; a profile is created when every
+     * file is present. Resolves with the install key that tags its downloads
+     * (HfDownloadProgress.catalogId).
+     */
     install(req: CatalogInstallRequest): Promise<string>
   }
   local: {
