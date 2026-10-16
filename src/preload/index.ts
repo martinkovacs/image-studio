@@ -29,6 +29,31 @@ const api: StudioApi = {
     install: (variantId) => invoke('engine:install', variantId),
     onInstallProgress: (cb) => subscribe('engine:progress', cb)
   },
+  backend: {
+    info: (refresh) => invoke('backend:info', refresh)
+  },
+  diffusers: {
+    info: () => invoke('diffusers:info'),
+    install: () => invoke('diffusers:install'),
+    remove: () => invoke('diffusers:remove'),
+    onInstallProgress: (cb) => subscribe('diffusers:progress', cb)
+  },
+  hf: {
+    setToken: (token) => invoke('hf:setToken', token),
+    search: (opts) => invoke('hf:search', opts),
+    repo: (id) => invoke('hf:repo', id),
+    download: (req) => invoke('hf:download', req),
+    cancel: (downloadId) => invoke('hf:cancel', downloadId),
+    downloads: () => invoke('hf:downloads'),
+    onProgress: (cb) => subscribe('hf:progress', cb),
+    local: () => invoke('hf:local'),
+    removeLocal: (repo) => invoke('hf:removeLocal', repo),
+    revealLocal: (repo) => invoke('hf:revealLocal', repo),
+    chooseModelsDir: () => invoke('hf:chooseModelsDir')
+  },
+  catalog: {
+    install: (req) => invoke('catalog:install', req)
+  },
   local: {
     status: () => invoke('local:status'),
     start: (profileId) => invoke('local:start', profileId),

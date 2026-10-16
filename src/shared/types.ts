@@ -18,7 +18,18 @@ export interface AppSettings {
     hasApiKey: boolean
     defaultModel: string
   }
+  huggingface: {
+    /** True when a Hugging Face token is stored (the token itself never leaves the main process). */
+    hasToken: boolean
+  }
   local: {
+    /**
+     * Inference backend preference. 'auto' picks diffusers on NVIDIA GPUs
+     * (Linux/Windows) and stable-diffusion.cpp everywhere else.
+     */
+    backend: BackendPreference
+    /** Where Hugging Face downloads are stored (main-process dialog only). */
+    modelsDir: string
     /** Selected engine variant id (see EngineVariant) or 'custom'. */
     engineVariant: string
     /** Used when engineVariant === 'custom': absolute path to an sd-server binary. */
@@ -30,18 +41,83 @@ export interface AppSettings {
 }
 
 // ---------------------------------------------------------------------------
-// Local (stable-diffusion.cpp)
+// Local backends
+
+/** stable-diffusion.cpp `sd-server`, or the bundled Python HF diffusers server. */
+export type LocalBackendId = 'sdcpp' | 'diffusers'
+export type BackendPreference = 'auto' | LocalBackendId
 
 /**
- * A launch profile for sd-server. `args` maps a flag id from SDCPP_LAUNCH_FLAGS
- * (e.g. "diffusion-model", "offload-to-cpu") to its value. Booleans are switches.
+ * A launch profile for a local backend. `args` maps a flag id to its value:
+ * SDCPP_LAUNCH_FLAGS for 'sdcpp', DIFFUSERS_LAUNCH_FLAGS for 'diffusers'.
+ * Booleans are switches.
  */
 export interface LocalModelProfile {
   id: string
   name: string
+  /** Backend this profile launches; absent means 'sdcpp' (profiles predating diffusers). */
+  backend?: LocalBackendId
+  /** Supported-model catalog entry this profile was created from, if any. */
+  catalogId?: string
   args: Record<string, string | number | boolean>
   /** Raw extra CLI args appended verbatim (shell-like split, quotes supported). */
   extraArgs: string
+}
+
+export const profileBackend = (p: Pick<LocalModelProfile, 'backend'>): LocalBackendId => p.backend ?? 'sdcpp'
+
+export interface GpuInfo {
+  vendor: 'nvidia' | 'amd' | 'intel' | 'apple' | 'other'
+  name: string
+  /** Dedicated VRAM in MiB, null when unknown. */
+  vramMiB: number | null
+  driver?: string
+}
+
+export interface HardwareInfo {
+  platform: string
+  arch: string
+  /** Total system RAM in MiB. */
+  ramMiB: number
+  gpus: GpuInfo[]
+}
+
+export interface BackendInfo {
+  preference: BackendPreference
+  /** What 'auto' resolves to on this machine. */
+  autoChoice: LocalBackendId
+  /** The backend in use: the override, or autoChoice. */
+  effective: LocalBackendId
+  /** Human-readable reason for autoChoice. */
+  reason: string
+  hardware: HardwareInfo
+  /** False when the diffusers runtime cannot run on this platform at all (e.g. no CUDA wheels). */
+  diffusersSupported: boolean
+}
+
+/** Managed Python environment (uv + venv + torch + diffusers) for the diffusers backend. */
+export interface DiffusersRuntimeInfo {
+  supported: boolean
+  installed: boolean
+  /** True when installed but resources/diffusers/requirements.txt changed since. */
+  outdated: boolean
+  pythonPath: string | null
+  torchVersion?: string
+  diffusersVersion?: string
+  cudaAvailable?: boolean
+  deviceName?: string
+  /** Approximate disk use of the runtime, bytes. */
+  sizeBytes?: number
+}
+
+export interface RuntimeInstallProgress {
+  phase: 'uv' | 'python' | 'venv' | 'torch' | 'packages' | 'verify' | 'done' | 'error'
+  message?: string
+  /** One line of installer output (uv / pip). */
+  log?: string
+  received?: number
+  total?: number
+  error?: string
 }
 
 export type ServerState = 'stopped' | 'starting' | 'ready' | 'error'
@@ -52,6 +128,9 @@ export interface ServerStatus {
   port: number | null
   error?: string
 }
+
+// ---------------------------------------------------------------------------
+// stable-diffusion.cpp engine
 
 export interface EngineVariant {
   id: string // e.g. "linux-vulkan", "win-cuda12", "custom-build"
@@ -79,8 +158,21 @@ export interface EngineInstallProgress {
   error?: string
 }
 
-/** Subset of GET /sdcpp/v1/capabilities we rely on (unknown fields kept). */
+/**
+ * Subset of GET /sdcpp/v1/capabilities we rely on (unknown fields kept). The
+ * diffusers server answers the same endpoint with `backend: 'diffusers'`.
+ */
 export interface SdCapabilities {
+  /** Absent for sd-server (implies 'sdcpp'). */
+  backend?: LocalBackendId
+  /** diffusers only: loaded pipeline class and per-request knobs it honours. */
+  diffusers?: {
+    pipeline: string
+    /** Request fields the pipeline honours, e.g. "negative_prompt", "txt_cfg", "distilled_guidance", "ref_images". */
+    supports: string[]
+    device: string
+    dtype: string
+  }
   model: { name: string; stem: string; path: string }
   supported_modes: string[]
   defaults_by_mode: { img_gen?: SdImgGenBody; [mode: string]: unknown }
@@ -168,6 +260,120 @@ export interface SdImgGenBody {
   scm_policy_dynamic?: boolean
   output_format?: string
   output_compression?: number
+}
+
+// ---------------------------------------------------------------------------
+// Hugging Face
+
+export type HfGated = false | 'auto' | 'manual'
+
+export interface HfModelSummary {
+  id: string
+  author?: string
+  downloads: number
+  likes: number
+  lastModified?: string
+  tags: string[]
+  pipelineTag?: string
+  libraryName?: string
+  gated: HfGated
+}
+
+export interface HfSearchOptions {
+  query: string
+  /** 'gguf' → repos tagged gguf; 'diffusers' → diffusers-format repos; 'all' → no format filter. */
+  format: 'gguf' | 'diffusers' | 'all'
+  /** 'text-to-image' | 'image-to-image' | null for any. */
+  task?: string | null
+  sort?: 'downloads' | 'likes' | 'lastModified' | 'trendingScore'
+  limit?: number
+}
+
+export interface HfFile {
+  /** Path inside the repo, '/'-separated. */
+  path: string
+  size: number
+  /** LFS sha256, when the file is stored in LFS/Xet. */
+  sha256?: string
+}
+
+export type HfRepoKind = 'diffusers' | 'gguf' | 'single-file' | 'other'
+
+/** GGUF files of one quantization level (split files are grouped together). */
+export interface HfQuantGroup {
+  /** e.g. "Q4_K_M", "UD-Q4_K_XL", "Q8_0", "BF16". */
+  quant: string
+  /** Approximate bits per weight, null when unknown. */
+  bits: number | null
+  files: HfFile[]
+  totalBytes: number
+  /** Common file stem without the quant suffix, distinguishes several models in one repo (e.g. mmproj). */
+  stem: string
+}
+
+export interface HfRepoDetails {
+  id: string
+  /** Commit sha the file list was read at; downloads pin to it. */
+  sha: string
+  kind: HfRepoKind
+  gated: HfGated
+  files: HfFile[]
+  quants: HfQuantGroup[]
+  totalBytes: number
+  cardExcerpt?: string
+  pipelineTag?: string
+  license?: string
+}
+
+export interface HfDownloadRequest {
+  repo: string
+  /** Commit sha or branch; default 'main'. */
+  revision?: string
+  /** Repo paths to fetch. */
+  files: string[]
+}
+
+export type HfDownloadState = 'queued' | 'downloading' | 'verifying' | 'done' | 'error' | 'cancelled'
+
+export interface HfDownloadProgress {
+  downloadId: string
+  repo: string
+  state: HfDownloadState
+  /** File currently transferring. */
+  file?: string
+  filesDone: number
+  filesTotal: number
+  bytesDone: number
+  bytesTotal: number
+  /** Bytes per second, smoothed. */
+  speed?: number
+  error?: string
+  /** Set when the download belongs to a catalog install. */
+  catalogId?: string
+}
+
+export interface HfLocalFile {
+  path: string
+  size: number
+  /** Absolute path on disk. */
+  absPath: string
+}
+
+export interface HfLocalRepo {
+  repo: string
+  /** Absolute repo directory. */
+  dir: string
+  files: HfLocalFile[]
+  totalBytes: number
+  kind: HfRepoKind
+}
+
+/** Install one supported model for one backend: downloads every component, then creates a profile. */
+export interface CatalogInstallRequest {
+  catalogId: string
+  backend: LocalBackendId
+  /** Chosen quant per component id (components with quant choices only). */
+  quants: Record<string, string>
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +510,34 @@ export interface StudioApi {
     info(): Promise<EngineInfo>
     install(variantId: string): Promise<void>
     onInstallProgress(cb: (p: EngineInstallProgress) => void): () => void
+  }
+  backend: {
+    /** Hardware probe + auto choice. `refresh` re-runs the GPU probe. */
+    info(refresh?: boolean): Promise<BackendInfo>
+  }
+  diffusers: {
+    info(): Promise<DiffusersRuntimeInfo>
+    install(): Promise<void>
+    remove(): Promise<void>
+    onInstallProgress(cb: (p: RuntimeInstallProgress) => void): () => void
+  }
+  hf: {
+    setToken(token: string | null): Promise<void>
+    search(opts: HfSearchOptions): Promise<HfModelSummary[]>
+    repo(id: string): Promise<HfRepoDetails>
+    /** Queues a download; resolves with its id immediately. */
+    download(req: HfDownloadRequest): Promise<string>
+    cancel(downloadId: string): Promise<void>
+    downloads(): Promise<HfDownloadProgress[]>
+    onProgress(cb: (p: HfDownloadProgress) => void): () => void
+    local(): Promise<HfLocalRepo[]>
+    removeLocal(repo: string): Promise<void>
+    revealLocal(repo: string): Promise<void>
+    chooseModelsDir(): Promise<AppSettings | null>
+  }
+  catalog: {
+    /** Starts downloading a supported model; a profile is created when every file is present. Resolves with the download id. */
+    install(req: CatalogInstallRequest): Promise<string>
   }
   local: {
     status(): Promise<ServerStatus>
