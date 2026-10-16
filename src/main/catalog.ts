@@ -17,6 +17,8 @@ export interface CatalogDeps {
   onProfileCreated: (settings: AppSettings) => void
   /** Largest GPU's VRAM, for machine-specific launch args. */
   vramMiB: () => Promise<number | null>
+  /** Reports a failure after the downloads finished (e.g. settings could not be written). */
+  onError: (installKey: string, message: string) => void
 }
 
 /** Profile for a finished install: recipe args plus every file slot pointing at the downloaded files. */
@@ -76,6 +78,10 @@ export async function installCatalogModel(req: CatalogInstallRequest, deps: Cata
           }
         })
         deps.onProfileCreated(next)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        console.error(`Catalog install ${key} failed after downloading:`, err)
+        deps.onError(key, `${model.label} downloaded, but its profile could not be created: ${message}`)
       } finally {
         running.delete(key)
       }

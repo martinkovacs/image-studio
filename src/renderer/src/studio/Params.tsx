@@ -90,6 +90,12 @@ export function OpenRouterParams({ model }: { model: OrImageModel | undefined })
 
 type P = SdImgGenBody
 
+/** Blank (or unparseable) clears the override so the model's own schedule applies. */
+function parseSigmas(txt: string): number[] | undefined {
+  const list = txt.split(',').map((x) => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite)
+  return list.length ? list : undefined
+}
+
 export function LocalParams({ advanced }: { advanced: boolean }) {
   const caps = useStore((s) => s.caps)
   const localParams = useStore((s) => s.localParams)
@@ -180,7 +186,7 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
                 defaultValue={(sp.custom_sigmas ?? []).join(', ')}
                 onBlur={(e) => {
                   const txt = e.target.value.trim()
-                  setSp({ custom_sigmas: txt ? txt.split(',').map(Number).filter(Number.isFinite) : [] })
+                  setSp({ custom_sigmas: parseSigmas(txt) })
                 }}
               />
             </Field>
@@ -230,7 +236,7 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
               defaultValue={(sp.custom_sigmas ?? []).join(', ')}
               onBlur={(e) => {
                 const txt = e.target.value.trim()
-                setSp({ custom_sigmas: txt ? txt.split(',').map(Number).filter(Number.isFinite) : [] })
+                setSp({ custom_sigmas: parseSigmas(txt) })
               }}
             />
           </Field>

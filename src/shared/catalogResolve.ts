@@ -63,8 +63,9 @@ export function resolveInstall(
     const choices = quantChoices(c, d)
     const quant = quants[c.id] ?? c.defaultQuant
     if (quant === ORIGINAL && c.originalLabel) return { component: c, repo: c.repo, files: [], bytes: 0, slotPath: null, quant, choices }
-    const group = choices.find((q) => q.quant === quant) ?? choices.find((q) => q.quant === c.defaultQuant)
-    if (!group) throw new Error(`${c.repo} has no ${quant} file`)
+    // No silent fallback: the user reviewed sizes for this exact choice.
+    const group = choices.find((q) => q.quant === quant)
+    if (!group) throw new Error(`${c.repo} has no ${quant} file any more — pick another quant`)
     const first = [...group.files].sort((a, b) => a.path.localeCompare(b.path))[0]
     return { component: c, repo: c.repo, files: group.files, bytes: group.totalBytes, slotPath: first.path, quant: group.quant, choices }
   })

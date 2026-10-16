@@ -84,6 +84,10 @@ describe('resolveInstall', () => {
     expect(() => resolveInstall(bad, {}, (id) => details[id])).toThrow(/no Q2_K/)
   })
 
+  it('never falls back to the default when the chosen quant is gone', () => {
+    expect(() => resolveInstall(recipe, { transformer: 'Q5_K_M' }, (id) => details[id])).toThrow(/no Q5_K_M file any more/)
+  })
+
   it('reports a missing single file', () => {
     const bad: CatalogRecipe = { ...recipe, components: [{ id: 'x', kind: 'file', label: 'x', slot: 'vae', repo: 'o/llm', path: 'nope.safetensors' }] }
     expect(() => resolveInstall(bad, {}, (id) => details[id])).toThrow(/no longer contains/)

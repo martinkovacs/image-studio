@@ -168,7 +168,9 @@ function CatalogCard({ model, downloads }: { model: CatalogModel; downloads: HfD
   const openSettings = useStore((s) => s.openSettings)
   const available = (['diffusers', 'sdcpp'] as LocalBackendId[]).filter((b) => model.recipes[b])
   const effective = backendInfo?.effective ?? 'sdcpp'
-  const [backend, setBackend] = useState<LocalBackendId>(available.includes(effective) ? effective : available[0])
+  // Follows the backend in use (it may resolve after mount, or change) until the user picks one here.
+  const [picked, setBackend] = useState<LocalBackendId | null>(null)
+  const backend: LocalBackendId = picked ?? (available.includes(effective) ? effective : available[0])
   const [open, setOpen] = useState(false)
   const [quants, setQuants] = useState<Record<string, string>>({})
   const recipe = model.recipes[backend]!

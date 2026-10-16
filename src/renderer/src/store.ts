@@ -174,6 +174,7 @@ export const useStore = create<Store>((set, get) => ({
     const orModel = localStorage.getItem('orModel') || settings.openrouter.defaultModel
     set({ settings, orModel, orExtraJson: loadOrExtraMap()[orModel] ?? '' })
     window.api.settings.onChanged((settings) => set({ settings }))
+    if (!SLIM) window.api.catalog.onError((e) => get().showError(e.error))
     window.api.gen.onProgress((p) => {
       const job = get().jobs[p.jobId]
       if (job) set({ jobs: { ...get().jobs, [p.jobId]: { ...job, progress: p } } })

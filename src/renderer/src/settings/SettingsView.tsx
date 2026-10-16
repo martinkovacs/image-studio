@@ -267,7 +267,8 @@ function DiffusersCard() {
       if (p.phase === 'done' || p.phase === 'error') void load()
     })
   }, [])
-  const busy = !!progress && progress.phase !== 'done' && progress.phase !== 'error'
+  // info.busy survives remounts (the install keeps running in the main process); progress is this view's live feed.
+  const busy = (!!progress && progress.phase !== 'done' && progress.phase !== 'error') || !!info?.busy
   const install = async () => {
     setLog([])
     setProgress({ phase: 'uv', message: 'Starting…' })
@@ -295,7 +296,8 @@ function DiffusersCard() {
           {info.outdated && <span className="text-safelight">update available</span>}
         </div>
       )}
-      {busy && (
+      {busy && !progress && <p className="text-[12px] text-ink-300">Installing in the background…</p>}
+      {busy && progress && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-3">
             <div className="h-[3px] flex-1 overflow-hidden rounded-full bg-ink-700">

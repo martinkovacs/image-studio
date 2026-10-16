@@ -53,7 +53,8 @@ const api: StudioApi = {
     chooseModelsDir: () => invoke('hf:chooseModelsDir')
   },
   catalog: {
-    install: (req) => invoke('catalog:install', req)
+    install: (req) => invoke('catalog:install', req),
+    onError: (cb) => subscribe('catalog:error', cb)
   },
   local: {
     status: () => invoke('local:status'),

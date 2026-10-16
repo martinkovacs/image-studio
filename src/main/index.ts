@@ -271,6 +271,10 @@ function registerIpc(): void {
   })
   ipcMain.handle('hf:chooseModelsDir', async () => {
     requireLocal()
+    // Queued files and catalog profiles resolve paths against the folder, so it must not move mid-download.
+    if (downloads.list().some((d) => d.state === 'queued' || d.state === 'downloading' || d.state === 'verifying')) {
+      throw new Error('Wait for the running downloads to finish (or cancel them) before changing the models folder')
+    }
     const res = await dialog.showOpenDialog(win!, { title: 'Models folder', properties: ['openDirectory', 'createDirectory'] })
     const dir = res.canceled ? undefined : res.filePaths[0]
     return dir ? updateSettings({ local: { modelsDir: dir } }) : null
@@ -288,6 +292,7 @@ function registerIpc(): void {
         getSettings,
         updateSettings,
         onProfileCreated: (s) => send('settings:changed', s),
+        onError: (catalogId, error) => send('catalog:error', { catalogId, error }),
         vramMiB: async () => maxVram((await probeHardware()).gpus)
       }
     )

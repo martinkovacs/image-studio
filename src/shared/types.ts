@@ -553,6 +553,8 @@ export interface StudioApi {
      * (HfDownloadProgress.catalogId).
      */
     install(req: CatalogInstallRequest): Promise<string>
+    /** A catalog install failed after its downloads finished. */
+    onError(cb: (e: { catalogId: string; error: string }) => void): () => void
   }
   local: {
     status(): Promise<ServerStatus>
