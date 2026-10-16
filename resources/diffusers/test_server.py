@@ -82,10 +82,31 @@ class ValidateModelDirTest(unittest.TestCase):
             server.validate_model_dir(str(model), 'Flux2Pipeline')
         self.assertIn('my_custom_library', str(ctx.exception))
 
-    def test_malformed_entry_is_refused(self):
-        model = write_model_index(self.root / 'm', {'_class_name': 'Flux2Pipeline', 'transformer': 'diffusers'})
-        with self.assertRaises(ValueError):
+    def test_non_component_entries_are_allowed(self):
+        """Scalars, dicts, numeric schedules and [null, null] are not components."""
+        model = write_model_index(
+            self.root / 'm',
+            {
+                '_class_name': 'QwenImage21Pipeline',
+                'transformer': ['diffusers', 'QwenImage21Transformer2DModel'],
+                'vae': [None, None],  # optional component left unloaded
+                # Qwen-Image-2.1-Turbo ships a sigma schedule in model_index.json.
+                'sample_sigmas': [1.0, 0.978453, 0.95418, 0.0],
+                'some_config': {'key': 'value'},
+                'num_layers': 42,
+            },
+        )
+        self.assertEqual(server.validate_model_dir(str(model), 'QwenImage21Pipeline'), model)
+
+    def test_component_shaped_entries_are_still_checked(self):
+        # Exactly ["library", "ClassName"] strings -> allow-list applies.
+        model = write_model_index(
+            self.root / 'm',
+            {'_class_name': 'Flux2Pipeline', 'transformer': ['my_module', 'MyPipe']},
+        )
+        with self.assertRaises(ValueError) as ctx:
             server.validate_model_dir(str(model), 'Flux2Pipeline')
+        self.assertIn('my_module', str(ctx.exception))
 
     def test_missing_model_index(self):
         model = self.root / 'empty'
@@ -345,6 +366,50 @@ class FakeEngine:
         return [bytes(PNG_1PX)]
 
 
+class JobQueueCancelRaceTest(unittest.TestCase):
+    """The queued-cancel race: pop + GENERATING must be atomic under the lock."""
+
+    def setUp(self):
+        self.engine = FakeEngine()  # generate blocks until released
+        self.queue = server.JobQueue(self.engine, job_ttl=60.0)
+        self.queue.start()
+        self.addCleanup(self.queue.stop)
+
+    def wait_until(self, predicate, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_cancelled_queued_job_never_reaches_the_engine(self):
+        first = server.Job(id='a', kwargs={'prompt': 'first'})
+        second = server.Job(id='b', kwargs={'prompt': 'second'})
+        self.queue.submit(first)
+        # first occupies the worker: FakeEngine.generate blocks until released
+        self.assertTrue(self.wait_until(lambda: len(self.engine.calls) == 1))
+        self.assertEqual(first.status, server.GENERATING)
+        self.queue.submit(second)
+        self.assertEqual(self.queue.cancel('b'), server.CANCELLED)
+        self.assertEqual(second.status, server.CANCELLED)
+        self.engine.release.set()
+        # The worker drains the queue; the cancelled job must never run.
+        self.assertTrue(
+            self.wait_until(lambda: (self.queue.get('a') or {}).get('status') == server.COMPLETED)
+        )
+        self.assertEqual([call['prompt'] for call in self.engine.calls], ['first'])
+        self.assertEqual(self.queue.get('b')['status'], server.CANCELLED)
+
+    def test_execute_skips_already_cancelled_jobs(self):
+        job = server.Job(id='c', kwargs={'prompt': 'ghost'})
+        job.status = server.CANCELLED
+        self.queue._execute(job)  # must return without calling generate
+        self.assertEqual(self.engine.calls, [])
+        self.assertEqual(job.status, server.CANCELLED)
+        self.assertIsNone(job.finished_at)
+
+
 class HttpServerTest(unittest.TestCase):
     def setUp(self):
         self._servers: list = []
@@ -436,6 +501,75 @@ class HttpServerTest(unittest.TestCase):
         self.assertTrue(caps['features_by_mode']['img_gen']['negative_prompt'])
         self.assertIn('negative_prompt', caps['diffusers']['supports'])
         self.assertEqual(caps['defaults_by_mode']['img_gen']['sample_params']['sample_steps'], 40)
+
+    # -- keep-alive -------------------------------------------------------------
+    # The Electron client's Node fetch reuses connections, so the handler must
+    # reset its per-request state and consume every request body.
+
+    def test_keep_alive_two_requests_one_connection(self):
+        _, port = self.start_server(FakeEngine())
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+        try:
+            for _ in range(2):
+                conn.request('GET', '/sdcpp/v1/capabilities')
+                response = conn.getresponse()
+                data = json.loads(response.read())
+                self.assertEqual(response.status, 200)
+                self.assertEqual(data['backend'], 'diffusers')
+        finally:
+            conn.close()
+
+    def test_keep_alive_img_gen_and_poll_on_one_connection(self):
+        engine = FakeEngine()
+        engine.release.set()
+        _, port = self.start_server(engine)
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+        try:
+            conn.request('GET', '/sdcpp/v1/capabilities')
+            response = conn.getresponse()
+            response.read()
+            self.assertEqual(response.status, 200)
+            conn.request('POST', '/sdcpp/v1/img_gen', body=json.dumps({'prompt': 'a cat'}).encode())
+            response = conn.getresponse()
+            submitted = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            # Poll on the SAME connection until the job finishes.
+            job = None
+            for _ in range(250):
+                conn.request('GET', f"/sdcpp/v1/jobs/{submitted['id']}")
+                response = conn.getresponse()
+                job = json.loads(response.read())
+                self.assertEqual(response.status, 200)
+                if job['status'] == 'completed':
+                    break
+                time.sleep(0.02)
+            self.assertEqual(job['status'], 'completed')
+        finally:
+            conn.close()
+
+    def test_keep_alive_unread_post_body_then_get(self):
+        # upscale / cancel / unknown POST routes ignore the body; the bytes
+        # must still be drained so the next request on the connection works.
+        _, port = self.start_server(FakeEngine())
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+        try:
+            for path in ('/sdcpp/v1/upscale', '/sdcpp/v1/jobs/abc/cancel', '/nope'):
+                conn.request(
+                    'POST', path,
+                    body=json.dumps({'anything': 'x' * 64}).encode(),
+                    headers={'Content-Type': 'application/json'},
+                )
+                response = conn.getresponse()
+                response.read()
+                self.assertIn(response.status, (200, 404, 501))
+                # The next request on the SAME connection must not be corrupted.
+                conn.request('GET', '/sdcpp/v1/capabilities')
+                response = conn.getresponse()
+                data = json.loads(response.read())
+                self.assertEqual(response.status, 200)
+                self.assertEqual(data['backend'], 'diffusers')
+        finally:
+            conn.close()
 
     # -- happy path -----------------------------------------------------------
 

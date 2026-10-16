@@ -406,8 +406,18 @@ def validate_model_dir(model_dir: str, pipeline_name: str) -> Path:
     for key, entry in index.items():
         if key.startswith('_'):
             continue
-        if not isinstance(entry, list) or len(entry) < 2 or not isinstance(entry[0], str):
-            raise ValueError(f'model_index.json entry {key!r} is malformed; expected ["library", "ClassName"]')
+        # Non-component entries are free-form config: scalars, dicts, numeric
+        # schedules (e.g. Qwen turbo's "sample_sigmas": [1.0, 0.97, ...]) or
+        # optional components left unloaded ([null, null]). Only entries that
+        # name an importable class — ["library", "ClassName"] — need
+        # allow-listing.
+        if not (
+            isinstance(entry, list)
+            and len(entry) == 2
+            and isinstance(entry[0], str)
+            and isinstance(entry[1], str)
+        ):
+            continue
         if entry[0] not in ALLOWED_LIBRARIES:
             raise ValueError(
                 f'model_index.json component {key!r} uses library {entry[0]!r}; '
@@ -566,6 +576,9 @@ class JobQueue:
             if job.status == QUEUED:
                 self._pending = [j for j in self._pending if j is not job]
                 job.status = CANCELLED
+                # Harmless if the worker already popped it: the skip below
+                # covers that window, and stop() does the same.
+                job.cancel_event.set()
                 job.finished_at = time.monotonic()
                 return CANCELLED
             if job.status == GENERATING:
@@ -577,10 +590,7 @@ class JobQueue:
 
     def _worker_loop(self) -> None:
         while not self._stop.is_set():
-            job = None
-            with self._lock:
-                if self._pending:
-                    job = self._pending.pop(0)
+            job = self._take_next()
             if job is None:
                 if self._wake.wait(timeout=SWEEP_INTERVAL_SECONDS):
                     self._wake.clear()
@@ -588,9 +598,25 @@ class JobQueue:
                 continue
             self._execute(job)
 
-    def _execute(self, job: Job) -> None:
+    def _take_next(self) -> Job | None:
+        """Pop the next runnable job and mark it GENERATING under one lock.
+
+        Pop + status transition must be atomic: a cancel arriving in between
+        would mark the job CANCELLED while the worker still runs it (and
+        without a cancel_event set). CANCELLED stragglers are skipped.
+        """
         with self._lock:
-            job.status = GENERATING
+            while self._pending:
+                job = self._pending.pop(0)
+                if job.status == CANCELLED:
+                    continue  # cancelled before the worker picked it up
+                job.status = GENERATING
+                return job
+        return None
+
+    def _execute(self, job: Job) -> None:
+        if job.status == CANCELLED:
+            return  # cancelled between pop and execute (defensive)
         log('generating image: 1/1')
         started = time.perf_counter()
 
@@ -943,11 +969,28 @@ class SdRequestHandler(BaseHTTPRequestHandler):
 
     protocol_version = 'HTTP/1.1'
     state: ServerState  # actually per-server: self.server.state
+    # Per-request flags; handle_one_request resets them (the handler instance
+    # is reused across requests on a keep-alive connection).
+    _response_started: bool = False
+    _body_consumed: bool = False
 
     # -- plumbing ------------------------------------------------------------
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
         pass  # silence per-request stderr spam (the app logs on its own)
+
+    def handle_one_request(self) -> None:
+        """Run the stdlib parse/dispatch for exactly one request.
+
+        BaseHTTPRequestHandler reuses this handler instance for every request
+        on a keep-alive connection (the Electron client's Node fetch reuses
+        them), so the per-request ``_response_started`` guard must be reset
+        here — otherwise the second request on a connection never gets a
+        reply.
+        """
+        self._response_started = False
+        self._body_consumed = False
+        super().handle_one_request()
 
     def _send_json(self, status: int, payload: Mapping[str, Any]) -> None:
         if getattr(self, '_response_started', False):
@@ -963,23 +1006,30 @@ class SdRequestHandler(BaseHTTPRequestHandler):
     def _read_body(self) -> bytes:
         header = self.headers.get('Content-Length')
         if header is None:
+            # Without a length we cannot know whether bytes follow; the
+            # connection cannot be reused safely.
+            self.close_connection = True
             raise ClientError(400, 'missing Content-Length')
         try:
             length = int(header)
         except ValueError as err:
+            self.close_connection = True
             raise ClientError(400, 'invalid Content-Length') from err
         if length < 0:
+            self.close_connection = True
             raise ClientError(400, 'invalid Content-Length')
         if length > MAX_BODY_BYTES:
             # Cannot drain 256+ MiB reliably: answer and close the connection.
             self.close_connection = True
             raise ClientError(413, f'request body too large ({length} bytes; the limit is {MAX_BODY_BYTES})')
         if length == 0:
+            self._body_consumed = True
             return b''
         body = self.rfile.read(length)
         if len(body) < length:
             self.close_connection = True
             raise ClientError(400, 'request body was truncated')
+        self._body_consumed = True
         return body
 
     def _read_json_body(self) -> dict[str, Any]:
@@ -992,6 +1042,37 @@ class SdRequestHandler(BaseHTTPRequestHandler):
             raise ClientError(400, 'request body must be a JSON object')
         return parsed
 
+    def _drain_or_close(self) -> None:
+        """Consume an unread request body so a keep-alive connection stays usable.
+
+        Routes that ignore the body (upscale, cancel, unknown paths) would
+        leave bytes in ``rfile`` and corrupt the next request on a reused
+        connection. Oversized or unreadable bodies are not drained; the
+        connection is closed instead.
+        """
+        if self.close_connection or self._body_consumed:
+            return
+        header = self.headers.get('Content-Length')
+        if header is None:
+            return  # no length announced: nothing to drain
+        try:
+            length = int(header)
+        except ValueError:
+            self.close_connection = True
+            return
+        if length <= 0:
+            return
+        if length > MAX_BODY_BYTES:
+            self.close_connection = True
+            return
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 64 * 1024))
+            if not chunk:
+                self.close_connection = True  # client went away mid-body
+                return
+            remaining -= len(chunk)
+
     def _safe_dispatch(self, handler: Callable[[str], None]) -> None:
         path = urllib.parse.urlsplit(self.path).path
         try:
@@ -1003,6 +1084,8 @@ class SdRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             traceback.print_exc()
             self._send_json(500, {'error': 'internal server error'})
+        finally:
+            self._drain_or_close()
 
     # -- routes ----------------------------------------------------------------
 
