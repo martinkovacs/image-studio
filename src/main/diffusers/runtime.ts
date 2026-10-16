@@ -144,7 +144,7 @@ async function findFile(dir: string, fileName: string): Promise<string | null> {
 const VERIFY_TORCH_EXIT = 2
 const VERIFY_DIFFUSERS_EXIT = 3
 
-/** Imports torch then diffusers, printed as one JSON line (stdout/code 0), exit 2 on a broken torch import, exit 3 on a broken diffusers import. CUDA unavailable is not a failure. */
+/** Imports torch then diffusers, printed as one JSON line (stdout/code 0), exit 2 on a broken torch import, exit 3 on a broken diffusers import. CUDA unavailable is not a failure; a failing CUDA probe is reported as cudaError instead. */
 const VERIFY_SNIPPET = [
   'import json, sys',
   'try:',
@@ -157,9 +157,15 @@ const VERIFY_SNIPPET = [
   'except Exception:',
   "    sys.stderr.write('diffusers cannot be imported\\n')",
   `    sys.exit(${VERIFY_DIFFUSERS_EXIT})`,
-  'cuda = torch.cuda.is_available()',
-  "device = torch.cuda.get_device_name(0) if cuda else ''",
-  "print(json.dumps({'torch': torch.__version__, 'diffusers': diffusers.__version__, 'cuda': bool(cuda), 'device': device}))"
+  'try:',
+  '    cuda = torch.cuda.is_available()',
+  "    device = torch.cuda.get_device_name(0) if cuda else ''",
+  "    cuda_error = ''",
+  'except Exception as exc:',
+  '    cuda = False',
+  "    device = ''",
+  '    cuda_error = str(exc)[:300]',
+  "print(json.dumps({'torch': torch.__version__, 'diffusers': diffusers.__version__, 'cuda': bool(cuda), 'device': device, 'cudaError': cuda_error}))"
 ].join('\n')
 
 interface VerifySummary {
@@ -167,6 +173,7 @@ interface VerifySummary {
   diffusers: string
   cuda: boolean
   device: string
+  cudaError: string
 }
 
 /** Last parseable stdout line with the expected shape (stderr noise is tolerated). */
@@ -179,7 +186,8 @@ function readVerifyJson(lines: string[]): VerifySummary | null {
           torch: typeof obj.torch === 'string' ? obj.torch : '',
           diffusers: obj.diffusers,
           cuda: obj.cuda === true,
-          device: typeof obj.device === 'string' ? obj.device : ''
+          device: typeof obj.device === 'string' ? obj.device : '',
+          cudaError: typeof obj.cudaError === 'string' ? obj.cudaError : ''
         }
       }
     } catch {
@@ -198,6 +206,8 @@ export interface RuntimeState {
   diffusersVersion?: string
   cudaAvailable?: boolean
   deviceName?: string
+  /** Text of the exception thrown by the CUDA probe, when it failed. */
+  cudaError?: string
 }
 
 export interface InstallRuntimeOptions {
@@ -250,6 +260,18 @@ async function doInstall(opts: InstallRuntimeOptions): Promise<RuntimeState> {
   const stagingVenv = path.join(root, 'venv.staging')
   const stagingPython = pythonPathIn(stagingVenv, platform)
   const env = uvEnv(root)
+
+  // Stale uv-download-* scratch dirs from crashed previous runs, swept before
+  // anything else; everything else in root is left alone.
+  try {
+    for (const e of await fs.readdir(root, { withFileTypes: true })) {
+      if (e.isDirectory() && e.name.startsWith('uv-download-')) {
+        await fs.rm(path.join(root, e.name), { recursive: true, force: true })
+      }
+    }
+  } catch {
+    // Root does not exist yet — nothing to clean.
+  }
 
   report({ phase: 'uv' })
 
@@ -379,16 +401,22 @@ async function doInstall(opts: InstallRuntimeOptions): Promise<RuntimeState> {
     if (hadVenv) await rename(oldVenv, venvDir).catch(() => undefined)
     throw err
   }
-  if (hadVenv) await fs.rm(oldVenv, { recursive: true, force: true })
   const state: RuntimeState = {
     requirementsSha256: await sha256File(requirementsPath),
     installedAt: new Date().toISOString(),
     ...(summary.torch ? { torchVersion: summary.torch } : {}),
     ...(summary.diffusers ? { diffusersVersion: summary.diffusers } : {}),
     cudaAvailable: summary.cuda,
-    ...(summary.device ? { deviceName: summary.device } : {})
+    ...(summary.device ? { deviceName: summary.device } : {}),
+    ...(summary.cudaError ? { cudaError: summary.cudaError } : {})
   }
+  if (!summary.cuda && summary.cudaError) {
+    report({ phase: 'verify', log: `CUDA unavailable: ${summary.cudaError}` })
+  }
+  // State lands on disk before venv.old is deleted, so a crash between the
+  // swap and the state write cannot leave a venv without a state.json for long.
   await fs.writeFile(path.join(root, 'state.json'), JSON.stringify(state, null, 2))
+  if (hadVenv) await fs.rm(oldVenv, { recursive: true, force: true })
   report({ phase: 'done' })
   return state
 }
@@ -400,7 +428,7 @@ export async function runtimeSizeBytes(root: string): Promise<number> {
   let total = 0
   const stack: string[] = [root]
   let visits = 0
-  while (stack.length > 0 && visits < 20000) {
+  while (stack.length > 0 && visits < 300000) {
     const dir = stack.pop() as string
     let entries: import('node:fs').Dirent[]
     try {
@@ -409,7 +437,7 @@ export async function runtimeSizeBytes(root: string): Promise<number> {
       continue
     }
     for (const e of entries) {
-      if (++visits >= 20000) break
+      if (++visits >= 300000) break
       const p = path.join(dir, e.name)
       if (e.isDirectory()) stack.push(p)
       else if (e.isFile()) {
@@ -437,7 +465,23 @@ export async function runtimeInfo(
     if (!(await exists(pythonPath))) {
       return { supported, installed: false, outdated: false, pythonPath: null, busy: runtimeBusy() }
     }
-    const state = JSON.parse(await fs.readFile(path.join(root, 'state.json'), 'utf8')) as RuntimeState
+    let state: RuntimeState | null = null
+    try {
+      state = JSON.parse(await fs.readFile(path.join(root, 'state.json'), 'utf8')) as RuntimeState
+    } catch {
+      // Crash between the venv swap and the state write: the venv exists but
+      // state.json is missing/unreadable — report installed but outdated.
+    }
+    if (!state) {
+      return {
+        supported,
+        installed: true,
+        outdated: true,
+        busy: runtimeBusy(),
+        pythonPath,
+        sizeBytes: await runtimeSizeBytes(root)
+      }
+    }
     let sha = ''
     try {
       sha = createHash('sha256').update(await fs.readFile(requirementsPath)).digest('hex')

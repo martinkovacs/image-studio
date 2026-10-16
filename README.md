@@ -43,7 +43,7 @@ The only model-specific code is the **supported-model catalog** (`src/shared/cat
 
 | Model | Elo | diffusers | sd.cpp |
 | --- | --- | --- | --- |
-| Qwen-Image 2.1 (+ official Turbo) | 1083 | `QwenImage21Pipeline` + optional GGUF transformer | GGUF + Qwen3-VL GGUF + mmproj |
+| Qwen-Image 2.1 / Turbo | 1083 / 1063 | `QwenImage21Pipeline` + optional GGUF transformer | GGUF + Qwen3-VL GGUF + mmproj |
 | FLUX.2 [dev] Turbo (fal LoRA) | 1017 | `Flux2Pipeline` (4-bit) + Turbo LoRA | — |
 | FLUX.2 [klein] 9B | 1015 | `Flux2KleinPipeline` (gated) + optional GGUF transformer | GGUF + Qwen3 8B GGUF |
 | FLUX.2 [dev] | 1000 | `Flux2Pipeline` (4-bit) | GGUF + Mistral Small 3.2 GGUF |
@@ -60,7 +60,7 @@ Not included: HunyuanImage 3.0 Instruct (1064; neither diffusers nor sd.cpp supp
 2. Upscale via **Hires fix** (set target "4K long edge") or the **ESRGAN Upscale** tool — put ESRGAN models (e.g. `RealESRGAN_x4plus.pth`) in the profile's upscaler directory (`hires-upscalers-dir`).
 3. Enable **VAE tiling** for large decodes to avoid VRAM blowups.
 
-**Qwen-Image 2.1** notes: native presets up to 2048/side (e.g. 2752×1536 16:9, from Unsloth's table), dimensions divisible by 32. Recommended settings differ per backend (Unsloth): sd.cpp **cfg 6, euler, 20 steps, flow shift automatic**; diffusers **40 steps, CFG 1**. Catalog installs apply them on first load; otherwise defaults come from the model's capabilities at runtime.
+**Qwen-Image 2.1** notes: native presets up to 2752 per side (e.g. 2752×1536 for 16:9, from the model card; the diffusers server caps sizes at 2048), dimensions divisible by 32. Recommended settings differ per backend (Unsloth): sd.cpp **cfg 6, euler, 20 steps, flow shift automatic**; diffusers **40 steps, CFG 1**. Catalog installs apply them on first load; otherwise defaults come from the model's capabilities at runtime.
 
 ## Editions
 
@@ -99,7 +99,7 @@ npm run dev
 - Vulkan works on NVIDIA, AMD and Intel GPUs.
 - A **custom binary path** is supported (`engineVariant: "custom"` → `customServerPath`).
 
-Run without a GPU: `linux-cpu` variant. Heavy models (FLUX.2, Qwen-Image) typically want `offload-to-cpu` and flash attention, which is what the catalog recipes set.
+Run without a GPU: `linux-cpu` variant. Heavy models (FLUX.2, Qwen-Image) typically want `offload-to-cpu`, which the catalog recipes set. Flash attention and direct convolutions are left to sd.cpp's per-module `auto` selection (`--flash-attn` / `--conv-direct`, master-962 and newer); the old `--fa` / `--diffusion-fa` / `--*-conv-direct` switches remain in the profile editor as legacy options for older builds.
 
 ## Where things live
 

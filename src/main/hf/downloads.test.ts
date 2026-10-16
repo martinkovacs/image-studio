@@ -16,6 +16,8 @@ interface RepoFetchOpts {
   ignoreRange?: boolean
   /** Emulate the resolve → CDN redirect inside fetch (auth dropped on the hop). */
   redirect?: boolean
+  /** Serve 206 responses whose content-range start does not match the request. */
+  badContentRange?: boolean
 }
 
 /** Fake fetch serving in-memory repo files with Range support. */
@@ -35,10 +37,11 @@ function repoFetch(files: Record<string, Buffer>, opts: RepoFetchOpts = {}) {
         return new Response(null, { status: 416 })
       }
       const slice = body.subarray(start)
+      const rangeStart = opts.badContentRange ? 0 : start
       calls.push({ url, headers, status: 206 })
       return new Response(new Uint8Array(slice), {
         status: 206,
-        headers: { 'content-range': `bytes ${start}-${body.length - 1}/${body.length}`, 'content-length': String(slice.length) }
+        headers: { 'content-range': `bytes ${rangeStart}-${body.length - 1}/${body.length}`, 'content-length': String(slice.length) }
       })
     }
     calls.push({ url, headers, status: 200 })
@@ -104,6 +107,38 @@ function gatedFetch(body: Buffer) {
     return Promise.resolve(new Response(stream, { status: 200, headers: { 'content-length': String(body.length) } }))
   }
   return { fetchImpl, sent, release }
+}
+
+/** Fake fetch sending one chunk and then never producing another byte. */
+function stallingFetch(body: Buffer) {
+  const fetchImpl: typeof fetch = (_input, init) => {
+    const signal = init?.signal
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c
+        controller.enqueue(body.subarray(0, 100))
+      },
+      cancel() {
+        // stopped producing bytes
+      }
+    })
+    // Real fetch surfaces an abort through the body iterator; do the same,
+    // passing the abort reason (the stall error) through.
+    signal?.addEventListener(
+      'abort',
+      () => {
+        try {
+          controller.error(signal.reason)
+        } catch {
+          // stream already closed
+        }
+      },
+      { once: true }
+    )
+    return Promise.resolve(new Response(stream, { status: 200, headers: { 'content-length': String(body.length) } }))
+  }
+  return { fetchImpl }
 }
 
 function makeManager(fetchImpl: typeof fetch, modelsDir: string, token: () => string | null = () => 'hf_tok') {
@@ -320,6 +355,53 @@ describe('DownloadManager', () => {
     expect((await fs.readFile(dest)).equals(body)).toBe(true)
   })
 
+  it('restarts from zero when a resumed 206 reports mismatched content-range', async () => {
+    const body = Buffer.from('C'.repeat(1000))
+    const dest = path.join(dir, 'owner', 'repo', 'm.gguf')
+    await fs.mkdir(path.dirname(dest), { recursive: true })
+    await fs.writeFile(`${dest}.part`, Buffer.alloc(400, 3))
+    const { fetchImpl, calls } = repoFetch({ 'm.gguf': body }, { badContentRange: true })
+    const mgr = makeManager(fetchImpl, dir)
+    const done = await mgr.whenDone(
+      mgr.enqueue({ repo: 'owner/repo', files: ['m.gguf'], expected: [{ path: 'm.gguf', size: body.length, sha256: sha256(body) }] })
+    )
+    expect(done.state).toBe('done')
+    expect(calls[0].status).toBe(206)
+    expect(calls[0].headers.range).toBe('bytes=400-')
+    expect(calls[1].status).toBe(200)
+    expect(calls[1].headers.range).toBeUndefined()
+    expect((await fs.readFile(dest)).equals(body)).toBe(true)
+    await expect(fs.stat(`${dest}.part`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('fails a stalled transfer as an error, not a cancel, and keeps the .part', async () => {
+    const body = Buffer.from('S'.repeat(1000))
+    const { fetchImpl } = stallingFetch(body)
+    const mgr = new DownloadManager({ modelsDir: () => dir, token: () => 'hf_tok', fetchImpl, stallTimeoutMs: 50 })
+    const done = await mgr.whenDone(
+      mgr.enqueue({ repo: 'owner/repo', files: ['m.gguf'], expected: [{ path: 'm.gguf', size: body.length, sha256: sha256(body) }] })
+    )
+    expect(done.state).toBe('error')
+    expect(done.error).toContain('Download stalled')
+    expect(done.error).toContain('resumes from where it stopped')
+    expect((await fs.stat(path.join(dir, 'owner', 'repo', 'm.gguf.part'))).size).toBe(100)
+    await expect(fs.stat(path.join(dir, 'owner', 'repo', 'm.gguf'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('reports done when cancelled right after the last file finished', async () => {
+    const body = Buffer.from('D'.repeat(1000))
+    const { fetchImpl } = repoFetch({ 'm.gguf': body })
+    const mgr = makeManager(fetchImpl, dir)
+    const id = mgr.enqueue({ repo: 'owner/repo', files: ['m.gguf'], expected: [{ path: 'm.gguf', size: body.length, sha256: sha256(body) }] })
+    // Cancel during the final per-file progress event: the record is not yet finished.
+    mgr.on('progress', (p) => {
+      if (p.downloadId === id && p.filesDone === p.filesTotal) mgr.cancel(id)
+    })
+    const done = await mgr.whenDone(id)
+    expect(done.state).toBe('done')
+    expect(done.filesDone).toBe(1)
+  })
+
   it('fails on sha mismatch, deletes the .part and writes no final file', async () => {
     const body = Buffer.from('corrupt-me'.repeat(50))
     const dest = path.join(dir, 'owner', 'repo', 'm.gguf')
@@ -408,6 +490,8 @@ describe('DownloadManager', () => {
     const mgr = makeManager(fetchImpl, dir)
     expect(() => mgr.enqueue({ repo: 'owner/repo', files: ['../evil.bin'] })).toThrow('Unsafe repository path')
     expect(() => mgr.enqueue({ repo: 'owner/repo', files: ['a\\b.gguf'] })).toThrow('Unsafe repository path')
+    expect(() => mgr.enqueue({ repo: 'owner/repo', files: ['.image-studio-files.json'] })).toThrow('Reserved file name')
+    expect(() => mgr.enqueue({ repo: 'owner/repo', files: ['con'] })).toThrow('Unsafe repository path')
     expect(() => mgr.enqueue({ repo: 'bad repo id', files: ['x'] })).toThrow('Invalid repository id')
     expect(mgr.localDir('owner/repo')).toBe(path.join(dir, 'owner', 'repo'))
   })
@@ -416,23 +500,37 @@ describe('DownloadManager', () => {
     const repoDir = path.join(dir, 'owner', 'repo')
     await fs.mkdir(path.join(repoDir, 'sub'), { recursive: true })
     await fs.mkdir(path.join(dir, 'owner', 'other'), { recursive: true })
+    await fs.mkdir(path.join(dir, 'owner', 'big'), { recursive: true })
+    await fs.mkdir(path.join(dir, 'owner', 'odd'), { recursive: true })
     await fs.writeFile(path.join(repoDir, 'model.gguf'), Buffer.alloc(10))
     await fs.writeFile(path.join(repoDir, 'sub', 'model-00001-of-00002.gguf'), Buffer.alloc(5))
     await fs.writeFile(path.join(repoDir, 'model.gguf.part'), Buffer.alloc(3))
     await fs.writeFile(path.join(repoDir, '.image-studio-files.json'), '{}')
     await fs.mkdir(path.join(repoDir, '.cache'), { recursive: true })
     await fs.writeFile(path.join(repoDir, '.cache', 'junk.gguf'), Buffer.alloc(2))
-    await fs.writeFile(path.join(dir, 'owner', 'other', 'model_index.json'), '')
+    await fs.writeFile(path.join(dir, 'owner', 'other', 'model_index.json'), JSON.stringify({ _class_name: 'StableDiffusionXLPipeline' }))
+    // Over 1 MB: the manifest is ignored rather than parsed.
+    await fs.writeFile(
+      path.join(dir, 'owner', 'big', 'model_index.json'),
+      Buffer.concat([Buffer.from(JSON.stringify({ _class_name: 'TooBigPipeline' })), Buffer.alloc(1024 * 1024)])
+    )
+    // Non-string _class_name is ignored.
+    await fs.writeFile(path.join(dir, 'owner', 'odd', 'model_index.json'), JSON.stringify({ _class_name: 42 }))
     const mgr = makeManager(repoFetch({}).fetchImpl, dir)
     const repos = await mgr.scanLocal()
-    expect(repos.map((r) => r.repo).sort()).toEqual(['owner/other', 'owner/repo'])
+    expect(repos.map((r) => r.repo).sort()).toEqual(['owner/big', 'owner/odd', 'owner/other', 'owner/repo'])
     const main = repos.find((r) => r.repo === 'owner/repo')!
     expect(main.kind).toBe('gguf')
+    expect(main.pipelineClass).toBeUndefined()
     expect(main.dir).toBe(repoDir)
     expect(main.files.map((f) => f.path)).toEqual(['model.gguf', 'sub/model-00001-of-00002.gguf'])
     expect(main.totalBytes).toBe(15)
     expect(main.files[0].absPath).toBe(path.join(repoDir, 'model.gguf'))
-    expect(repos.find((r) => r.repo === 'owner/other')!.kind).toBe('diffusers')
+    const other = repos.find((r) => r.repo === 'owner/other')!
+    expect(other.kind).toBe('diffusers')
+    expect(other.pipelineClass).toBe('StableDiffusionXLPipeline')
+    expect(repos.find((r) => r.repo === 'owner/big')!.pipelineClass).toBeUndefined()
+    expect(repos.find((r) => r.repo === 'owner/odd')!.pipelineClass).toBeUndefined()
 
     await mgr.removeLocal('owner/repo')
     await expect(fs.stat(repoDir)).rejects.toMatchObject({ code: 'ENOENT' })

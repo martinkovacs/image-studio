@@ -15,6 +15,7 @@ import type {
   ServerStatus
 } from '@shared/types'
 import { CATALOG_BY_ID } from '@shared/catalog'
+import { profileBackend } from '@shared/types'
 import { uid } from './lib/util'
 import { SLIM } from './lib/edition'
 
@@ -134,10 +135,12 @@ export function effectiveLocalParams(s: Pick<State, 'caps' | 'localParams'>): Sd
 }
 
 /** Recommended per-generation settings when the active profile came from the supported-model catalog. */
-function catalogDefaults(s: Pick<State, 'settings'>, caps: SdCapabilities): SdImgGenBody | null {
+function catalogDefaults(s: Pick<State, 'settings' | 'serverStatus'>, caps: SdCapabilities): SdImgGenBody | null {
   const profile = activeProfile(s)
   if (!profile?.catalogId) return null
-  return CATALOG_BY_ID.get(profile.catalogId)?.recipes[caps.backend ?? 'sdcpp']?.defaults ?? null
+  // Only when the loaded server really runs the active profile (it may have changed while loading).
+  if (s.serverStatus.profileId !== profile.id || profileBackend(profile) !== (caps.backend ?? 'sdcpp')) return null
+  return CATALOG_BY_ID.get(profile.catalogId)?.recipes[profileBackend(profile)]?.defaults ?? null
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined
@@ -181,23 +184,30 @@ export const useStore = create<Store>((set, get) => ({
     })
     window.api.local.onStatus((s) => {
       set({ serverStatus: s })
-      if (s.state === 'ready') void get().refreshCaps()
+      if (s.state === 'ready') get().refreshCaps().catch((e: Error) => get().showError(e.message))
       if (s.state === 'stopped' || s.state === 'error') set({ caps: null })
       if (s.state === 'error' && s.error) get().showError(s.error.split('\n')[0])
     })
     void get().loadOrModels()
     void get().refreshHistory()
     if (SLIM) return
-    void get().refreshBackend()
+    get().refreshBackend().catch((e: Error) => get().showError(e.message))
     const status = await window.api.local.status()
     set({ serverStatus: status })
-    if (status.state === 'ready') void get().refreshCaps()
+    if (status.state === 'ready') get().refreshCaps().catch((e: Error) => get().showError(e.message))
   },
 
   async updateSettings(patch) {
+    const before = get().settings?.local.activeProfileId
     const settings = await window.api.settings.update(patch)
     set({ settings })
-    if (patch.local?.backend) void get().refreshBackend()
+    if (patch.local?.backend) get().refreshBackend().catch((e: Error) => get().showError(e.message))
+    // Another profile: the loaded model's capabilities and overrides no longer apply.
+    if (settings.local.activeProfileId !== before) {
+      set({ caps: null, localParams: {} })
+      const st = get().serverStatus
+      if (st.state === 'ready' && st.profileId === settings.local.activeProfileId) get().refreshCaps().catch(() => undefined)
+    }
   },
 
   setView: (view) => set({ view }),
@@ -274,10 +284,13 @@ export const useStore = create<Store>((set, get) => ({
   async refreshCaps() {
     const caps = await window.api.local.capabilities()
     if (!caps) return set({ caps, localParams: {} })
+    // Edits made while the model was loading (no caps yet) live only in memory; keep them.
+    const pending = get().caps ? {} : get().localParams
     // First load of a model installed from the catalog: start from its recommended settings.
     const seeded = localStorage.getItem(localKey(caps.model.stem)) === null ? catalogDefaults(get(), caps) : null
-    if (seeded) localStorage.setItem(localKey(caps.model.stem), JSON.stringify(seeded))
-    set({ caps, localParams: seeded ?? loadLocalOverrides(caps.model.stem) })
+    const localParams = mergeBody(seeded ?? loadLocalOverrides(caps.model.stem), pending)
+    if (seeded || Object.keys(pending).length) localStorage.setItem(localKey(caps.model.stem), JSON.stringify(localParams))
+    set({ caps, localParams })
   },
 
   async refreshHistory() {
@@ -293,6 +306,10 @@ export const useStore = create<Store>((set, get) => ({
       return null
     }
     const inputs = opts?.inputs ?? s.inputs
+    if (s.provider === 'local' && inputs.initImage && s.caps?.features_by_mode.img_gen?.init_image === false) {
+      s.showError('The loaded model does not support img2img — remove the init image, or add it as a reference image to edit')
+      return null
+    }
     const req: GenerationRequest = {
       provider: s.provider,
       prompt,

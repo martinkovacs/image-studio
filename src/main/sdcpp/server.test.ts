@@ -11,11 +11,23 @@ import {
   SdServer,
   buildServerArgs,
   parseProgressLine,
+  parseStageLine,
   splitOutputLines,
   splitShellArgs,
   type SpawnImpl
 } from './server'
 import type { LocalModelProfile, ServerStatus } from '@shared/types'
+
+describe('parseStageLine', () => {
+  it('maps sd.cpp master-968 log lines (and the diffusers server lines) to stages', () => {
+    expect(parseStageLine('[INFO ] generating image: 1/1 - seed 42')).toBe('sampling')
+    expect(parseStageLine('generating image: 1/1')).toBe('sampling')
+    expect(parseStageLine('[INFO ] decoding 1 latents')).toBe('decoding')
+    expect(parseStageLine('[INFO ] decoding 1/2 latents')).toBe('decoding')
+    expect(parseStageLine('[INFO ] hires fix: upscaling to 2048x2048')).toBe('hires')
+    expect(parseStageLine('loading model')).toBeNull()
+  })
+})
 
 describe('splitShellArgs', () => {
   it('splits on whitespace', () => {
@@ -530,7 +542,8 @@ describe('SdServer imgGen / upscale (mock fetch)', () => {
     let polls = 0
     const sequences = [
       { status: 'queued', queue_position: 2 },
-      { status: 'generating' },
+      // sd-server keeps sending queue_position 0 while generating; that is not a queue update.
+      { status: 'generating', queue_position: 0 },
       { status: 'completed', result: { output_format: 'png', images: [{ b64_json: Buffer.from('hello').toString('base64') }] } }
     ]
     vi.stubGlobal(
@@ -552,6 +565,36 @@ describe('SdServer imgGen / upscale (mock fetch)', () => {
     expect(res.images[0].toString()).toBe('hello')
     expect(queued).toBe(2)
     expect(states).toEqual(['queued', 'generating'])
+  })
+
+  it('only reports onQueued while the job is queued', async () => {
+    let polls = 0
+    const sequences = [
+      { status: 'generating', queue_position: 0 },
+      { status: 'completed', queue_position: 0, result: { output_format: 'png', images: [{ b64_json: 'aGk=' }] } }
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+        const url = String(input)
+        if (url.endsWith('/img_gen')) return jsonResponse(200, { id: 'j9' })
+        return jsonResponse(200, sequences[Math.min(polls++, sequences.length - 1)])
+      })
+    )
+    const queued: number[] = []
+    await server.imgGen({ prompt: 'x' } as SdImgGenBody, { onQueued: (p) => queued.push(p) })
+    expect(queued).toEqual([])
+  })
+
+  it('treats a completed job without images as an error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+        if (String(input).endsWith('/img_gen')) return jsonResponse(200, { id: 'j8' })
+        return jsonResponse(200, { status: 'completed', result: { output_format: 'png', images: [] } })
+      })
+    )
+    await expect(server.imgGen({ prompt: 'x' } as SdImgGenBody, {})).rejects.toThrow(/returned no images/)
   })
 
   it('cancel answered 409 (already generating) → AbortError with interrupted: false', async () => {

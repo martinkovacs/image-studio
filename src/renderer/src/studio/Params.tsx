@@ -1,6 +1,6 @@
 import { Dices, Plus, RotateCcw, Trash2 } from 'lucide-react'
-import type { OrImageModel, SdImgGenBody } from '@shared/types'
-import { effectiveLocalParams, useStore } from '../store'
+import { profileBackend, type OrImageModel, type SdImgGenBody } from '@shared/types'
+import { activeProfile, effectiveLocalParams, useStore } from '../store'
 import { Button, Chip, Field, NumberInput, Section, Select, SliderField, TextInput, Toggle } from '../components/ui'
 
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31)
@@ -111,7 +111,13 @@ export function LocalParams({ advanced }: { advanced: boolean }) {
   const samplerOptions = caps?.samplers ?? []
   const schedulerOptions = caps?.schedulers ?? []
   // The diffusers server lists the request fields its pipeline honours; sd-server honours everything.
-  const dSupports = caps?.backend === 'diffusers' ? new Set(caps.diffusers?.supports ?? []) : null
+  const profile = useStore(activeProfile)
+  const dSupports =
+    caps?.backend === 'diffusers'
+      ? new Set(caps.diffusers?.supports ?? [])
+      : !caps && profile && profileBackend(profile) === 'diffusers'
+        ? new Set<string>() // not loaded yet: show only what every pipeline takes
+        : null
   const has = (f: string) => !dSupports || dSupports.has(f)
 
   return (

@@ -10,7 +10,7 @@ import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Dirent } from 'node:fs'
 import type { HfDownloadProgress, HfDownloadRequest, HfDownloadState, HfFile, HfLocalFile, HfLocalRepo } from '@shared/types'
-import { fileUrl, isHfUrl, getRepoDetails, isSafeRepoPath, isValidRepoId, repoKindFromPaths } from './hub'
+import { fileUrl, isHfUrl, getRepoDetails, isSafeRepoPath, isValidRepoId, MANIFEST_NAME, repoKindFromPaths } from './hub'
 
 export interface DownloadManagerOptions {
   /** Returns the root directory holding <owner>/<repo> model folders. */
@@ -20,6 +20,8 @@ export interface DownloadManagerOptions {
   fetchImpl?: typeof fetch
   /** Repo files fetched in parallel within one download (default 2). */
   concurrency?: number
+  /** Abort a transfer that receives no bytes for this long (default 60 s). */
+  stallTimeoutMs?: number
 }
 
 interface DownloadRecord {
@@ -57,8 +59,9 @@ const PROGRESS_MIN_MS = 250
  * `<localDir>/.image-studio-files.json` = `{ [repoPath]: { size, sha256?, revision } }`.
  * Files all revisions share one folder, so a size match alone is not enough to
  * skip a download: the manifest vouches for which exact bytes are in place.
+ * The name is exported from hub.ts (MANIFEST_NAME) so repo listings can
+ * exclude it and enqueue/destPath can refuse to write a file with that name.
  */
-const MANIFEST_NAME = '.image-studio-files.json'
 
 interface ManifestEntry {
   /** Size of the verified file in bytes. */
@@ -103,11 +106,25 @@ async function recordVerified(repoDir: string, repoPath: string, entry: Manifest
   await run
 }
 
+/** `_class_name` from a small `<repoDir>/model_index.json`, for diffusers pipelines. */
+async function readPipelineClass(dir: string): Promise<{ pipelineClass?: string }> {
+  try {
+    const file = path.join(dir, 'model_index.json')
+    if ((await fs.stat(file)).size >= 1_000_000) return {}
+    const parsed: unknown = JSON.parse(await fs.readFile(file, 'utf8'))
+    const cls = (parsed as { _class_name?: unknown } | null)?._class_name
+    return typeof cls === 'string' && cls ? { pipelineClass: cls } : {}
+  } catch {
+    return {}
+  }
+}
+
 export class DownloadManager extends EventEmitter {
   private readonly modelsDir: () => string
   private readonly token: () => string | null
   private readonly fetchImpl: typeof fetch
   private readonly concurrency: number
+  private readonly stallTimeoutMs: number
   private readonly records = new Map<string, DownloadRecord>()
   private readonly queue: string[] = []
   private readonly finishedList: HfDownloadProgress[] = []
@@ -119,12 +136,14 @@ export class DownloadManager extends EventEmitter {
     this.token = opts.token
     this.fetchImpl = opts.fetchImpl ?? fetch.bind(globalThis)
     this.concurrency = Math.max(1, opts.concurrency ?? 2)
+    this.stallTimeoutMs = Math.max(1, opts.stallTimeoutMs ?? 60000)
   }
 
   /** Queues a download and returns its id immediately. */
   enqueue(req: HfDownloadRequest & { catalogId?: string; expected?: HfFile[] }): string {
     if (!isValidRepoId(req.repo)) throw new Error('Invalid repository id')
     for (const p of req.files) {
+      if (p === MANIFEST_NAME) throw new Error('Reserved file name')
       if (!isSafeRepoPath(p)) throw new Error(`Unsafe repository path: ${p}`)
     }
     const id = randomUUID()
@@ -216,7 +235,8 @@ export class DownloadManager extends EventEmitter {
           dir,
           files,
           totalBytes: files.reduce((n, f) => n + f.size, 0),
-          kind: repoKindFromPaths(files.map((f) => f.path))
+          kind: repoKindFromPaths(files.map((f) => f.path)),
+          ...(await readPipelineClass(dir))
         })
       }
     }
@@ -278,6 +298,8 @@ export class DownloadManager extends EventEmitter {
       if (rec.failed) {
         rec.state = 'error'
         rec.error = rec.failed
+      } else if (rec.filesDone >= rec.filesTotal) {
+        rec.state = 'done' // every file finished — an abort at the very end still counts as done
       } else if (rec.controller.signal.aborted) {
         rec.state = 'cancelled'
       } else {
@@ -336,53 +358,92 @@ export class DownloadManager extends EventEmitter {
     const partPath = `${dest}.part`
     let partSize = await fileSize(partPath)
 
-    // Ask for the remaining bytes; a 416 (part larger than the file) restarts from zero.
-    let res: Response | null = null
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const url = fileUrl(rec.repo, rec.revision, meta.path)
-      const headers: Record<string, string> = {}
-      const token = this.token()
-      if (token && isHfUrl(url)) headers.Authorization = `Bearer ${token}`
-      if (partSize > 0) headers.Range = `bytes=${partSize}-`
-      // redirect:'follow' drops Authorization on the cross-origin CDN hop — intended.
-      res = await this.fetchImpl(url, { headers, redirect: 'follow', signal: rec.controller.signal })
-      if (res.status === 416 && partSize > 0) {
-        await fs.rm(partPath, { force: true })
-        partSize = 0
-        continue
-      }
-      break
+    // Stall watchdog: aborts the transfer when no bytes arrive for stallTimeoutMs.
+    // Linked to the download's controller so a user cancel still aborts the fetch.
+    const stall = new AbortController()
+    const onOuterAbort = () => stall.abort(rec.controller.signal.reason)
+    rec.controller.signal.addEventListener('abort', onOuterAbort, { once: true })
+    let stallTimer: ReturnType<typeof setTimeout> | undefined
+    const pauseStall = () => {
+      if (stallTimer !== undefined) clearTimeout(stallTimer)
+      stallTimer = undefined
     }
-    if (!res || (!res.ok && res.status !== 206)) {
-      throw new Error(`Download failed for ${meta.path} (HTTP ${res?.status ?? 0})`)
+    const resetStall = () => {
+      pauseStall()
+      const seconds = Math.max(1, Math.round(this.stallTimeoutMs / 1000))
+      stallTimer = setTimeout(
+        () => stall.abort(new Error(`Download stalled — no data for ${seconds} s; it resumes from where it stopped when you retry`)),
+        this.stallTimeoutMs
+      )
     }
-
-    const resuming = res.status === 206 && partSize > 0
-    let fileBytes = resuming ? partSize : 0
-    rec.inflight.set(meta.path, fileBytes)
+    const clearStall = () => {
+      pauseStall()
+      rec.controller.signal.removeEventListener('abort', onOuterAbort)
+    }
     const hash = createHash('sha256')
-    if (resuming) {
-      // The hash covers the whole file, so feed it the bytes already on disk.
-      for await (const chunk of createReadStream(partPath)) hash.update(chunk)
-    } else {
-      await fs.rm(partPath, { force: true })
-    }
+    let fileBytes = 0
 
-    if (!res.body) throw new Error(`Download failed for ${meta.path}: empty response body`)
-    const out = await fs.open(partPath, resuming ? 'a' : 'w')
     try {
-      for await (const chunk of res.body) {
-        if (rec.controller.signal.aborted) throw new Error('Download cancelled')
-        const buf = chunk as Buffer
-        hash.update(buf)
-        await out.write(buf)
-        fileBytes += buf.byteLength
-        rec.inflight.set(meta.path, fileBytes)
-        this.maybeEmitProgress(rec)
+      // Ask for the remaining bytes; 416 (part larger than the file) or a 206
+      // whose content-range does not line up with the part restarts from zero.
+      let res: Response | null = null
+      for (let attempt = 0; attempt < 2; attempt++) {
+        resetStall()
+        const url = fileUrl(rec.repo, rec.revision, meta.path)
+        const headers: Record<string, string> = {}
+        const token = this.token()
+        if (token && isHfUrl(url)) headers.Authorization = `Bearer ${token}`
+        if (partSize > 0) headers.Range = `bytes=${partSize}-`
+        // redirect:'follow' drops Authorization on the cross-origin CDN hop — intended.
+        res = await this.fetchImpl(url, { headers, redirect: 'follow', signal: stall.signal })
+        const rangeOk = res.status !== 206 || (res.headers.get('content-range') ?? '').startsWith(`bytes ${partSize}-`)
+        if (partSize > 0 && (res.status === 416 || !rangeOk)) {
+          await fs.rm(partPath, { force: true })
+          partSize = 0
+          continue
+        }
+        break
       }
+      if (!res || (!res.ok && res.status !== 206)) {
+        throw new Error(`Download failed for ${meta.path} (HTTP ${res?.status ?? 0})`)
+      }
+
+      const resuming = res.status === 206 && partSize > 0
+      fileBytes = resuming ? partSize : 0
+      rec.inflight.set(meta.path, fileBytes)
+      if (resuming) {
+        // The hash covers the whole file, so feed it the bytes already on disk.
+        // Local work — pause the watchdog until streaming resumes.
+        pauseStall()
+        for await (const chunk of createReadStream(partPath)) hash.update(chunk)
+      } else {
+        await fs.rm(partPath, { force: true })
+      }
+
+      if (!res.body) throw new Error(`Download failed for ${meta.path}: empty response body`)
+      resetStall() // re-armed after the local re-hash, before waiting for the first chunk
+      const out = await fs.open(partPath, resuming ? 'a' : 'w')
+      try {
+        for await (const chunk of res.body) {
+          resetStall()
+          if (rec.controller.signal.aborted) throw new Error('Download cancelled')
+          const buf = chunk as Buffer
+          hash.update(buf)
+          await out.write(buf)
+          fileBytes += buf.byteLength
+          rec.inflight.set(meta.path, fileBytes)
+          this.maybeEmitProgress(rec)
+        }
+      } finally {
+        await out.close()
+        rec.inflight.delete(meta.path)
+      }
+    } catch (err) {
+      // A stall surfaces as its own error — never as a user cancel.
+      if (stall.signal.aborted && !rec.controller.signal.aborted) throw stall.signal.reason ?? err
+      throw err
     } finally {
-      await out.close()
-      rec.inflight.delete(meta.path)
+      clearStall()
     }
 
     rec.state = 'verifying'
@@ -399,6 +460,7 @@ export class DownloadManager extends EventEmitter {
   }
 
   private destPath(repo: string, relPath: string): string {
+    if (relPath === MANIFEST_NAME) throw new Error('Reserved file name')
     if (!isSafeRepoPath(relPath)) throw new Error(`Unsafe repository path: ${relPath}`)
     const root = path.resolve(this.localDir(repo))
     const dest = path.resolve(root, ...relPath.split('/'))

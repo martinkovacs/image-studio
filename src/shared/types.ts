@@ -370,6 +370,8 @@ export interface HfLocalRepo {
   files: HfLocalFile[]
   totalBytes: number
   kind: HfRepoKind
+  /** `_class_name` from the repo's model_index.json, when present. */
+  pipelineClass?: string
 }
 
 /** Install one supported model for one backend: downloads every component, then creates a profile. */

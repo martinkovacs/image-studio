@@ -122,7 +122,8 @@ export function getSettings(): AppSettings {
 
 function persist(settings: AppSettings): Promise<void> {
   const data = JSON.stringify(settings, null, 2)
-  writeQueue = writeQueue.then(async () => {
+  // catch first: one failed write must not reject every later one.
+  writeQueue = writeQueue.catch(() => undefined).then(async () => {
     await mkdir(app.getPath('userData'), { recursive: true })
     const tmp = settingsPath() + '.tmp'
     await writeFile(tmp, data)

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft, Check, Download, ExternalLink, FolderOpen, Heart, Lock, Search, Trash2, X } from 'lucide-react'
 import type {
   HfDownloadProgress,
@@ -11,6 +11,7 @@ import type {
   LocalModelProfile
 } from '@shared/types'
 import { CATALOG, catalogInstallKey, type CatalogModel } from '@shared/catalog'
+import { DIFFUSERS_PIPELINES } from '@shared/diffusersFlags'
 import { installFit, ORIGINAL, quantChoices, recommendedArgs, resolveInstall, type InstallFit, type ResolvedInstall } from '@shared/catalogResolve'
 import { formatBytes, quantFit } from '@shared/quants'
 import { useStore } from '../store'
@@ -42,7 +43,14 @@ function useRepos(ids: string[], enabled = true) {
     let live = true
     for (const id of ids) {
       fetchRepo(id).then(
-        (d) => live && setDetails((cur) => ({ ...cur, [id]: d })),
+        (d) => {
+          if (!live) return
+          setDetails((cur) => ({ ...cur, [id]: d }))
+          setErrors((cur) => {
+            const { [id]: _gone, ...rest } = cur
+            return rest
+          })
+        },
         (e: Error) => live && setErrors((cur) => ({ ...cur, [id]: e.message }))
       )
     }
@@ -480,15 +488,19 @@ function SearchTab({ downloads }: { downloads: HfDownloadProgress[] }) {
   const [busy, setBusy] = useState(false)
   const [repo, setRepo] = useState<string | null>(null)
 
+  // Only the latest search may update the list (an older, slower one must not overwrite it).
+  const seq = useRef(0)
   const run = async (o: HfSearchOptions) => {
+    const mine = ++seq.current
     setBusy(true)
     setError(null)
     try {
-      setResults(await window.api.hf.search(o))
+      const r = await window.api.hf.search(o)
+      if (mine === seq.current) setResults(r)
     } catch (e) {
-      setError((e as Error).message)
+      if (mine === seq.current) setError((e as Error).message)
     } finally {
-      setBusy(false)
+      if (mine === seq.current) setBusy(false)
     }
   }
   useEffect(() => {
@@ -582,10 +594,18 @@ function SearchTab({ downloads }: { downloads: HfDownloadProgress[] }) {
 // ---------------------------------------------------------------------------
 // Downloaded
 
-/** A starting profile for a downloaded repo; the user fills in the rest in the editor. */
+/** A starting profile for a downloaded repo; the user fills in the rest in the editor. Throws for unsupported pipelines. */
 function profileFor(r: HfLocalRepo): LocalModelProfile {
   const name = r.repo.split('/')[1]
-  if (r.kind === 'diffusers') return { id: uid(), name, backend: 'diffusers', args: { model: r.dir }, extraArgs: '' }
+  if (r.kind === 'diffusers') {
+    const pipeline = DIFFUSERS_PIPELINES.find((p) => p === r.pipelineClass)
+    if (!pipeline) {
+      throw new Error(
+        `${r.repo} uses ${r.pipelineClass ?? 'an unknown pipeline'}; the diffusers backend runs ${DIFFUSERS_PIPELINES.join(', ')}`
+      )
+    }
+    return { id: uid(), name, backend: 'diffusers', args: { pipeline, model: r.dir }, extraArgs: '' }
+  }
   const main = r.files.find((f) => f.path.endsWith('.gguf') && !/mmproj/i.test(f.path)) ?? r.files.find((f) => f.path.endsWith('.safetensors'))
   return { id: uid(), name, backend: 'sdcpp', args: main ? { 'diffusion-model': main.absPath } : {}, extraArgs: '' }
 }
@@ -637,8 +657,12 @@ function DownloadedTab({ downloads }: { downloads: HfDownloadProgress[] }) {
               variant="ghost"
               title="New profile from these files"
               onClick={async () => {
-                await update({ local: { profiles: [...settings.local.profiles, profileFor(r)] } })
-                openSettings('profiles')
+                try {
+                  await update({ local: { profiles: [...settings.local.profiles, profileFor(r)] } })
+                  openSettings('profiles')
+                } catch (e) {
+                  showError((e as Error).message)
+                }
               }}
             >
               Profile

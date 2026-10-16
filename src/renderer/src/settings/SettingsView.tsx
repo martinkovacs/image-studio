@@ -198,7 +198,7 @@ function CodeLine({ text }: { text: string }) {
   return (
     <div className="flex items-center justify-between gap-2 rounded-md border border-ink-800 bg-ink-950 px-3 py-2 font-mono text-[12px] text-ink-200">
       <span className="select-text">{text}</span>
-      <button onClick={() => void navigator.clipboard.writeText(text)} className="text-ink-400 hover:text-ink-100">
+      <button title="Copy" aria-label="Copy" onClick={() => void navigator.clipboard.writeText(text)} className="text-ink-400 hover:text-ink-100">
         <Copy size={12} />
       </button>
     </div>

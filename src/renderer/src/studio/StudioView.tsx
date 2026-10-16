@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { KeyRound, Sparkles, Wand2 } from 'lucide-react'
-import { useStore } from '../store'
+import { activeProfile, useStore } from '../store'
+import { profileBackend } from '@shared/types'
 import { Button, Section, Segmented, TextArea } from '../components/ui'
 import { imagesFromTransfer } from '../lib/util'
 import { SLIM } from '../lib/edition'
@@ -78,7 +79,11 @@ export function StudioView() {
   const local = provider === 'local'
   const caps = useStore((s) => s.caps)
   const diffusers = caps?.backend === 'diffusers'
-  const negSupported = caps?.features_by_mode.img_gen?.negative_prompt !== false
+  const profile = useStore(activeProfile)
+  // Before capabilities arrive, a diffusers pipeline's support is unknown: hide rather than flash.
+  const capsPending = !caps && !!profile && profileBackend(profile) === 'diffusers'
+  const negSupported = !capsPending && caps?.features_by_mode.img_gen?.negative_prompt !== false
+  const initSupported = !capsPending && caps?.features_by_mode.img_gen?.init_image !== false
   const needsKey = provider === 'openrouter' && !settings.openrouter.hasApiKey
   const capsStem = useStore((s) => s.caps?.model.stem)
 
@@ -172,7 +177,7 @@ export function StudioView() {
 
           <Section title="Images" open={imagesOpen} onToggle={setImagesOpen}>
             <RefImages orModel={model} />
-            {local && advanced && (
+            {local && advanced && initSupported && (
               <div className="flex flex-col gap-3 border-t border-ink-800 pt-3">
                 <span className="label-caps">Init image · img2img / inpaint</span>
                 <InitImage />

@@ -26,10 +26,15 @@ export interface ResolvedInstall {
 
 export const ORIGINAL = 'original'
 
-/** Quant groups of a gguf component (filtered by stem when the repo hosts several models). */
+/**
+ * Quant groups of a gguf component (filtered by stem when the repo hosts
+ * several models). Split (multi-file) quants are left out: the profile slot
+ * takes one file, and neither diffusers' from_single_file nor sd.cpp follows
+ * llama.cpp's split naming.
+ */
 export function quantChoices(c: Extract<CatalogComponent, { kind: 'gguf' }>, details: HfRepoDetails): HfQuantGroup[] {
   const stem = c.stem?.toLowerCase()
-  return details.quants.filter((q) => !/^mmproj/i.test(q.stem) && (!stem || q.stem.toLowerCase() === stem))
+  return details.quants.filter((q) => q.files.length === 1 && !/^mmproj/i.test(q.stem) && (!stem || q.stem.toLowerCase() === stem))
 }
 
 /** Throws a readable error when a repo lacks what the recipe expects. */

@@ -185,6 +185,14 @@ export function diffusersLaunch(opts: {
       HF_HUB_OFFLINE: '1',
       HF_HOME: opts.hfHome,
       PYTHONNOUSERSITE: '1',
+      // UTF-8 stdio regardless of the Windows ANSI code page (non-ASCII user names in paths).
+      PYTHONUTF8: '1',
+      // Neutralize an activated conda/venv the app may have been launched from;
+      // CPython treats empty values as unset.
+      PYTHONHOME: '',
+      PYTHONPATH: '',
+      VIRTUAL_ENV: '',
+      CONDA_PREFIX: '',
       PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True'
     },
     label: 'diffusers server',

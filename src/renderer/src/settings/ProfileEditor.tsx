@@ -128,15 +128,21 @@ export function ProfileEditor({
 
   const switchBackend = (b: LocalBackendId) => {
     if (b === backend) return
-    if (Object.keys(p.args).length > 0 && !confirm('Switching the backend clears this profile\u2019s files and options. Continue?')) return
-    setP({ ...p, backend: b, args: {}, catalogId: undefined })
+    if ((Object.keys(p.args).length > 0 || p.extraArgs.trim()) && !confirm('Switching the backend clears this profile\u2019s files, options and extra args. Continue?')) return
+    setP({ ...p, backend: b, args: {}, extraArgs: '', catalogId: undefined })
   }
 
   const applyModel = (id: string) => {
     const m = CATALOG_BY_ID.get(id)
     const r = m?.recipes[backend]
     if (!m || !r) return setP({ ...p, catalogId: undefined })
-    setP((cur) => ({ ...cur, catalogId: m.id, name: cur.name || m.label, args: { ...cur.args, ...r.args } }))
+    // Files picked for another supported model don't fit this one; hand-picked files of a
+    // custom profile and non-file options (memory, devices, …) carry over.
+    const fileSlot = (id: string) => flags.some((f) => f.id === id && (f.type === 'path' || f.type === 'dir'))
+    setP((cur) => {
+      const kept = Object.fromEntries(Object.entries(cur.args).filter(([id]) => !cur.catalogId || cur.catalogId === m.id || !fileSlot(id)))
+      return { ...cur, catalogId: m.id, name: cur.name || m.label, args: { ...kept, ...r.args } }
+    })
   }
 
   const save = () => {

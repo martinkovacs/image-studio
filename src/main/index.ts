@@ -26,10 +26,10 @@ import { getEngineInfo, installEngine, resolveServerPath } from './sdcpp/engine'
 import { listDevices, SdServer } from './sdcpp/server'
 import { diffusersLaunch, sdcppLaunch, type LaunchSpec } from './backends/launch'
 import { chooseBackend, probeHardware } from './hardware'
-import { getRuntimeInfo, installRuntime, runtimePythonPath, runtimeRoot, serverScript, uninstallRuntime } from './diffusers/runtime'
+import { getRuntimeInfo, installRuntime, runtimeBusy, runtimePythonPath, runtimeRoot, serverScript, uninstallRuntime } from './diffusers/runtime'
 import { filesForDiffusersRepo, getRepoDetails, searchModels } from './hf/hub'
 import { DownloadManager } from './hf/downloads'
-import { installCatalogModel } from './catalog'
+import { installCatalogModel, reposInUse } from './catalog'
 
 /**
  * Squirrel.Windows runs the app with --squirrel-* flags during install/update/
@@ -91,6 +91,8 @@ const send = (channel: string, payload: unknown): void => {
 /** Launch spec for a profile on its own backend; throws a user-facing error when that backend is not installed. */
 async function resolveLaunch(settings: AppSettings, profile: LocalModelProfile): Promise<LaunchSpec> {
   if (profileBackend(profile) === 'diffusers') {
+    // The installer swaps the venv in place; a server started from it mid-install breaks both.
+    if (runtimeBusy()) throw new Error('The diffusers runtime is being installed or removed — wait for it to finish')
     const pythonPath = await runtimePythonPath()
     if (!pythonPath) throw new Error('The diffusers runtime is not installed — install it in Settings → Local engine')
     return diffusersLaunch({ pythonPath, scriptPath: serverScript(), profile, hfHome: join(runtimeRoot(), 'hf-home') })
@@ -262,7 +264,9 @@ function registerIpc(): void {
   })
   ipcMain.handle('hf:removeLocal', (_e, repo) => {
     requireLocal()
-    return downloads.removeLocal(str(repo, 'repository id'))
+    const id = str(repo, 'repository id')
+    if (reposInUse().has(id)) throw new Error(`${id} is part of a model install that is still running`)
+    return downloads.removeLocal(id)
   })
   ipcMain.handle('hf:revealLocal', async (_e, repo) => {
     requireLocal()
@@ -272,12 +276,17 @@ function registerIpc(): void {
   ipcMain.handle('hf:chooseModelsDir', async () => {
     requireLocal()
     // Queued files and catalog profiles resolve paths against the folder, so it must not move mid-download.
-    if (downloads.list().some((d) => d.state === 'queued' || d.state === 'downloading' || d.state === 'verifying')) {
-      throw new Error('Wait for the running downloads to finish (or cancel them) before changing the models folder')
+    const assertIdle = (): void => {
+      if (downloads.list().some((d) => d.state === 'queued' || d.state === 'downloading' || d.state === 'verifying') || reposInUse().size > 0) {
+        throw new Error('Wait for the running downloads to finish (or cancel them) before changing the models folder')
+      }
     }
+    assertIdle()
     const res = await dialog.showOpenDialog(win!, { title: 'Models folder', properties: ['openDirectory', 'createDirectory'] })
     const dir = res.canceled ? undefined : res.filePaths[0]
-    return dir ? updateSettings({ local: { modelsDir: dir } }) : null
+    if (!dir) return null
+    assertIdle() // a download may have started while the dialog was open
+    return updateSettings({ local: { modelsDir: dir } })
   })
 
   ipcMain.handle('catalog:install', (_e, req: CatalogInstallRequest) => {

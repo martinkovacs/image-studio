@@ -20,6 +20,17 @@ export interface HfRepoOpts extends HfRequestOpts {
 const GATED_MESSAGE = 'This repository is gated — accept its licence on huggingface.co and add a token in Settings → Hugging Face'
 const REPO_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/
 const MAX_TREE_PAGES = 20
+/** Root-level name reserved for the local verified-files manifest; never a repo file. */
+export const MANIFEST_NAME = '.image-studio-files.json'
+
+/** Windows device names are reserved even with an extension, on every platform. */
+const WINDOWS_RESERVED = new Set([
+  'con', 'prn', 'aux', 'nul',
+  ...Array.from({ length: 9 }, (_, i) => `com${i + 1}`),
+  ...Array.from({ length: 9 }, (_, i) => `lpt${i + 1}`)
+])
+/** Characters Windows forbids in file names, plus ASCII control characters. */
+const UNSAFE_SEGMENT_RE = /[<>:"|?*\u0000-\u001f\u007f]/
 
 export function isValidRepoId(id: string): boolean {
   return REPO_ID_RE.test(id) && !id.includes('..')
@@ -29,7 +40,14 @@ export function isValidRepoId(id: string): boolean {
 export function isSafeRepoPath(p: string): boolean {
   if (!p || p.length >= 512) return false
   if (p.startsWith('/') || p.includes('\\') || p.includes(':')) return false
-  return p.split('/').every((seg) => seg.length > 0 && seg !== '.' && seg !== '..')
+  return p.split('/').every((seg) => {
+    if (seg.length === 0 || seg === '.' || seg === '..') return false
+    if (seg.endsWith('.') || seg.endsWith(' ')) return false
+    if (UNSAFE_SEGMENT_RE.test(seg)) return false
+    const dot = seg.indexOf('.')
+    const stem = (dot === -1 ? seg : seg.slice(0, dot)).toLowerCase()
+    return !WINDOWS_RESERVED.has(stem)
+  })
 }
 
 function assertRepoId(id: string): void {
@@ -118,7 +136,8 @@ interface RawTreeEntry {
 /**
  * Repo metadata + full file list. Reads /api/models/{id} (at `revision` when a
  * non-main branch is given) and then the tree at the returned commit sha,
- * following `Link: rel="next"` pagination up to 20 pages.
+ * following `Link: rel="next"` pagination up to 20 pages; repos whose tree
+ * still has more pages after that throw instead of truncating silently.
  */
 export async function getRepoDetails(id: string, { token, fetchImpl, revision }: HfRepoOpts = {}): Promise<HfRepoDetails> {
   assertRepoId(id)
@@ -142,6 +161,7 @@ export async function getRepoDetails(id: string, { token, fetchImpl, revision }:
     }
     for (const e of (await tres.json()) as RawTreeEntry[]) {
       if (e.type === 'directory' || !e.path || !isSafeRepoPath(e.path)) continue
+      if (e.path === MANIFEST_NAME) continue // reserved for the local files manifest
       // lfs.oid is the file's sha256 (also for Xet-backed files); xetHash is a
       // different (merkle) hash and must not be compared against sha256.
       const sha256 = e.lfs?.oid
@@ -149,6 +169,7 @@ export async function getRepoDetails(id: string, { token, fetchImpl, revision }:
     }
     url = nextLinkUrl(tres.headers)
   }
+  if (url) throw new Error('Repository has too many files to list')
   return {
     id,
     sha,

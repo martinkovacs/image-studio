@@ -42,7 +42,11 @@ export type CatalogComponent =
 
 export interface CatalogRecipe {
   components: CatalogComponent[]
-  /** Launch args merged into the created profile (file slots are filled from components). */
+  /**
+   * Launch args merged into the created profile (file slots are filled from
+   * components). Flash attention / direct convolutions are left to sd.cpp's
+   * per-module auto selection (master-962+).
+   */
   args: Record<string, string | number | boolean>
   /** Per-generation defaults applied the first time the model is loaded. */
   defaults: SdImgGenBody
@@ -113,9 +117,9 @@ export const CATALOG: CatalogModel[] = [
           QWEN3VL_LLM,
           QWEN3VL_MMPROJ
         ],
-        args: { fa: true, 'offload-to-cpu': true },
+        args: { 'offload-to-cpu': true },
         defaults: { sample_params: { sample_steps: 20, sample_method: 'euler', guidance: { txt_cfg: 6 } } },
-        note: 'cfg 6, euler, 20 steps, flow shift automatic. Dimensions divisible by 32, up to 2048 per side.'
+        note: 'cfg 6, euler, 20 steps, flow shift automatic. Dimensions divisible by 32; the model card lists sizes up to 2752 per side.'
       },
       diffusers: {
         components: [
@@ -132,11 +136,11 @@ export const CATALOG: CatalogModel[] = [
     id: 'qwen-image-2.1-turbo',
     label: 'Qwen-Image 2.1 Turbo',
     creator: 'Alibaba',
-    elo: 1083,
+    elo: 1063,
     licence: QWEN_LICENCE,
     licenceUrl: 'https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo',
     maxRefImages: 10,
-    description: 'Official 8-step distilled checkpoint of Qwen-Image 2.1 (scored with the base model). About 5× faster at similar quality.',
+    description: 'Official 8-step distilled checkpoint of Qwen-Image 2.1. About 5× faster at similar quality.',
     recipes: {
       sdcpp: {
         components: [
@@ -145,7 +149,7 @@ export const CATALOG: CatalogModel[] = [
           QWEN3VL_LLM,
           QWEN3VL_MMPROJ
         ],
-        args: { fa: true, 'offload-to-cpu': true },
+        args: { 'offload-to-cpu': true },
         defaults: { sample_params: { sample_steps: 8, sample_method: 'euler', custom_sigmas: QWEN21_TURBO_SIGMAS, guidance: { txt_cfg: 1 } } },
         note: '8 steps, cfg 1, euler with the qwen-image-2.1-turbo sigma schedule (pre-filled as custom sigmas).'
       },
@@ -176,7 +180,7 @@ export const CATALOG: CatalogModel[] = [
         ],
         args: { pipeline: pipeline('Flux2Pipeline'), offload: 'model', dtype: 'bfloat16' },
         defaults: { sample_params: { sample_steps: 8, custom_sigmas: FLUX2_TURBO_SIGMAS, guidance: { txt_cfg: 2.5 } } },
-        note: '8 steps, guidance 2.5 with fal’s pre-shifted sigmas (pre-filled). Uses the 4-bit diffusers build of FLUX.2 [dev] (~32 GB on disk).'
+        note: '8 steps, guidance 2.5 with fal’s pre-shifted sigmas (pre-filled). Uses the 4-bit diffusers build of FLUX.2 [dev] (~34 GB on disk).'
       }
     }
   },
@@ -195,7 +199,7 @@ export const CATALOG: CatalogModel[] = [
           { id: 'vae', kind: 'file', label: 'VAE', slot: 'vae', repo: 'Comfy-Org/vae-text-encorder-for-flux-klein-9b', path: 'split_files/vae/flux2-vae.safetensors' },
           { id: 'llm', kind: 'gguf', label: 'Text encoder (Qwen3 8B)', slot: 'llm', repo: 'unsloth/Qwen3-8B-GGUF', stem: 'Qwen3-8B', defaultQuant: 'Q4_K_M' }
         ],
-        args: { 'diffusion-fa': true, 'offload-to-cpu': true },
+        args: { 'offload-to-cpu': true },
         defaults: { sample_params: { sample_steps: 4, sample_method: 'euler', guidance: { txt_cfg: 1 } } },
         note: '4 steps, cfg 1, euler.'
       },
@@ -226,7 +230,7 @@ export const CATALOG: CatalogModel[] = [
           FLUX2_VAE,
           MISTRAL_LLM
         ],
-        args: { 'diffusion-fa': true, 'offload-to-cpu': true },
+        args: { 'offload-to-cpu': true },
         defaults: { sample_params: { sample_steps: 28, sample_method: 'euler', guidance: { txt_cfg: 1, distilled_guidance: 4 } } },
         note: '~28 steps, cfg 1, distilled guidance 4, euler.'
       },
@@ -234,7 +238,7 @@ export const CATALOG: CatalogModel[] = [
         components: [FLUX2_DEV_BNB],
         args: { pipeline: pipeline('Flux2Pipeline'), offload: 'model', dtype: 'bfloat16' },
         defaults: { sample_params: { sample_steps: 28, guidance: { txt_cfg: 4 } } },
-        note: '28 steps (50 for best quality), guidance 4. Uses the 4-bit diffusers build (~32 GB on disk).'
+        note: '28 steps (50 for best quality), guidance 4. Uses the 4-bit diffusers build (~34 GB on disk).'
       }
     }
   }

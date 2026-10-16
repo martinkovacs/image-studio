@@ -54,6 +54,17 @@ describe('isSafeRepoPath', () => {
       expect(isSafeRepoPath(p)).toBe(false)
     }
   })
+  it('rejects Windows-reserved names and unsafe segment characters', () => {
+    for (const p of [
+      'con', 'CON.txt', 'prn', 'aux', 'nul', 'com1', 'Com9.gguf', 'lpt7',
+      'name.', 'name ', 'a<b', 'a>b', 'a"b', 'a|b', 'a?b', 'a*b', 'a\u0000b', 'sub/com1.gguf'
+    ]) {
+      expect(isSafeRepoPath(p)).toBe(false)
+    }
+    expect(isSafeRepoPath('constant.gguf')).toBe(true)
+    expect(isSafeRepoPath('com10/model.gguf')).toBe(true)
+    expect(isSafeRepoPath('model name.gguf')).toBe(true)
+  })
 })
 
 describe('searchModels', () => {
@@ -156,12 +167,37 @@ describe('getRepoDetails', () => {
     const { fetchImpl, calls } = fakeFetch((url) => {
       if (url.endsWith('/api/models/o/r')) return json(info)
       page++
-      const headers = { link: `<${HF_BASE}/api/models/o/r/tree/abc?recursive=true&cursor=p${page}>; rel="next"` }
+      const headers = page < 20 ? { link: `<${HF_BASE}/api/models/o/r/tree/abc?recursive=true&cursor=p${page}>; rel="next"` } : undefined
       return json([{ type: 'file', path: `f${page}.bin`, size: 1 }], headers)
     })
     const d = await getRepoDetails('o/r', { fetchImpl })
     expect(d.files).toHaveLength(20)
     expect(calls.filter((c) => c.url.includes('/tree/'))).toHaveLength(20)
+  })
+
+  it('throws when the tree still has more pages after the limit', async () => {
+    let page = 0
+    const { fetchImpl } = fakeFetch((url) => {
+      if (url.endsWith('/api/models/o/r')) return json(info)
+      page++
+      return json([{ type: 'file', path: `f${page}.bin`, size: 1 }], {
+        link: `<${HF_BASE}/api/models/o/r/tree/abc?recursive=true&cursor=p${page}>; rel="next"`
+      })
+    })
+    await expect(getRepoDetails('o/r', { fetchImpl })).rejects.toThrow('Repository has too many files to list')
+  })
+
+  it('skips the reserved manifest name from the file list', async () => {
+    const { fetchImpl } = fakeFetch((url) => {
+      if (url.endsWith('/api/models/o/r')) return json({ sha: 'abc123', gated: false })
+      return json([
+        { type: 'file', path: '.image-studio-files.json', size: 5 },
+        { type: 'file', path: 'sub/.image-studio-files.json', size: 5 },
+        { type: 'file', path: 'm.gguf', size: 1 }
+      ])
+    })
+    const d = await getRepoDetails('o/r', { fetchImpl })
+    expect(d.files.map((f) => f.path)).toEqual(['sub/.image-studio-files.json', 'm.gguf'])
   })
 
   it('never sends the token to non-huggingface URLs', async () => {

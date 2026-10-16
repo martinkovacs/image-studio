@@ -106,6 +106,11 @@ describe('diffusersLaunch', () => {
       HF_HUB_OFFLINE: '1',
       HF_HOME: '/data/hf',
       PYTHONNOUSERSITE: '1',
+      PYTHONUTF8: '1',
+      PYTHONHOME: '',
+      PYTHONPATH: '',
+      VIRTUAL_ENV: '',
+      CONDA_PREFIX: '',
       PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True'
     })
   })

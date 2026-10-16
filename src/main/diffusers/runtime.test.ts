@@ -44,6 +44,8 @@ interface FakeRunOpts {
   failVerifyTorch?: boolean
   /** Return 3 (diffusers import failure) for the python -c verification step. */
   failVerify?: boolean
+  /** Overrides the JSON summary printed by the verification step. */
+  verifyJson?: string
 }
 
 function makeFakeRun(opts: FakeRunOpts = {}): { run: RunFn, commands: RecordedCmd[] } {
@@ -65,7 +67,7 @@ function makeFakeRun(opts: FakeRunOpts = {}): { run: RunFn, commands: RecordedCm
     if (args.includes('-c')) {
       if (opts.failVerifyTorch) return 2
       if (opts.failVerify) return 3
-      runOpts.onLine?.(VERIFIED_JSON)
+      runOpts.onLine?.(opts.verifyJson ?? VERIFIED_JSON)
     }
     return 0
   }
@@ -165,6 +167,11 @@ describe('installRuntimeCore', () => {
     const requestedUrls: string[] = []
     // A stale venv.old from an interrupted previous swap must not survive.
     await fs.mkdir(path.join(root, 'venv.old'), { recursive: true })
+    // A stale uv-download-* scratch dir from a crashed previous run is swept
+    // at install start; anything else in root is left alone.
+    await fs.mkdir(path.join(root, 'uv-download-stale'), { recursive: true })
+    await fs.writeFile(path.join(root, 'uv-download-stale', 'partial'), 'x')
+    await fs.writeFile(path.join(root, 'keep-me.txt'), 'keep')
 
     const state = await installRuntimeCore({
       root,
@@ -221,8 +228,33 @@ describe('installRuntimeCore', () => {
     await expect(fs.stat(path.join(root, 'venv.old'))).rejects.toMatchObject({ code: 'ENOENT' })
     const stateFile = JSON.parse(await fs.readFile(path.join(root, 'state.json'), 'utf8')) as Record<string, string>
     expect(stateFile.requirementsSha256).toBe(sha256Hex(REQ_CONTENT))
-    // The download scratch dir is gone again.
+    // The download scratch dir is gone again, and only scratch dirs were swept.
     expect((await fs.readdir(root)).filter((n) => n.startsWith('uv-download-'))).toEqual([])
+    await expect(fs.readFile(path.join(root, 'keep-me.txt'), 'utf8')).resolves.toBe('keep')
+  })
+
+  it('succeeds when the CUDA probe fails, recording cudaError in state and progress', async () => {
+    const root = await newRoot('cudaerr')
+    const requirementsPath = await reqFile(root)
+    const cudaError = 'CUDA driver version is insufficient'
+    const { run, commands } = makeFakeRun({
+      verifyJson: `{"torch":"2.9.0+cu128","diffusers":"0.36.0","cuda":false,"device":"","cudaError":"${cudaError}"}`
+    })
+    const progress: import('@shared/types').RuntimeInstallProgress[] = []
+    await fs.mkdir(path.join(root, 'uv'), { recursive: true })
+    await fs.writeFile(path.join(root, 'uv', 'uv'), FAKE_UV)
+    const state = await installRuntimeCore({
+      root, requirementsPath, platform: 'linux', arch: 'x64', run, fetchImpl: makeFetch(), onProgress: (p) => progress.push(p)
+    })
+    // The probe failure does not fail the install; it is recorded instead.
+    expect(state.cudaAvailable).toBe(false)
+    expect(state.cudaError).toBe(cudaError)
+    expect(state.deviceName).toBeUndefined()
+    const stateFile = JSON.parse(await fs.readFile(path.join(root, 'state.json'), 'utf8')) as Record<string, string>
+    expect(stateFile.cudaError).toBe(cudaError)
+    // The error is surfaced as a verify log line.
+    expect(progress.some((p) => p.phase === 'verify' && p.log === `CUDA unavailable: ${cudaError}`)).toBe(true)
+    expect(commands.filter((c) => c.args.includes('-c'))).toHaveLength(1)
   })
 
   it('skips the uv download when uv already exists and --version succeeds', async () => {
@@ -494,15 +526,32 @@ describe('runtimeInfo', () => {
     expect(info.outdated).toBe(true)
   })
 
-  it('reports installed:false when python or the state file are missing', async () => {
-    const { root, requirementsPath } = await seededRoot(null)
-    expect((await runtimeInfo(root, requirementsPath, 'linux', 'x64')).installed).toBe(false)
+  it('reports installed:false only when the venv python is missing', async () => {
     const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rt-empty-'))
     tmps.push(parent)
+    const requirementsPath = path.join(parent, 'requirements.txt')
+    await fs.writeFile(requirementsPath, REQ_CONTENT)
     const empty = await runtimeInfo(parent, requirementsPath, 'linux', 'x64')
     expect(empty.installed).toBe(false)
     expect(empty.pythonPath).toBeNull()
     expect(empty.outdated).toBe(false)
+  })
+
+  it('reports installed + outdated when the venv exists but state.json is missing or unreadable', async () => {
+    const { root, requirementsPath } = await seededRoot(null)
+    const missing = await runtimeInfo(root, requirementsPath, 'linux', 'x64')
+    expect(missing.installed).toBe(true)
+    expect(missing.outdated).toBe(true)
+    expect(missing.pythonPath).toBe(path.join(root, 'venv', 'bin', 'python'))
+    expect(missing.torchVersion).toBeUndefined()
+    expect(missing.diffusersVersion).toBeUndefined()
+    expect(missing.cudaAvailable).toBeUndefined()
+    // Corrupt state.json counts as unreadable too.
+    await fs.writeFile(path.join(root, 'state.json'), 'not json{')
+    const corrupt = await runtimeInfo(root, requirementsPath, 'linux', 'x64')
+    expect(corrupt.installed).toBe(true)
+    expect(corrupt.outdated).toBe(true)
+    expect(corrupt.sizeBytes).toBeGreaterThan(0)
   })
 
   it('marks the platform unsupported and never throws', async () => {

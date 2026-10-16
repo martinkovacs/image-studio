@@ -2,6 +2,7 @@
 // component repos' file lists, queues one pinned download per repo and, once
 // every file is on disk, adds a ready-to-use profile.
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AppSettings, CatalogInstallRequest, DeepPartial, HfRepoDetails, LocalModelProfile } from '@shared/types'
 import { CATALOG_BY_ID, catalogInstallKey } from '@shared/catalog'
@@ -42,6 +43,13 @@ export function profileFromInstall(
 }
 
 const running = new Set<string>()
+/** Repos each running install still needs (removal of those is refused). */
+const runningRepos = new Map<string, string[]>()
+
+/** Repos needed by catalog installs that have not finished yet. */
+export function reposInUse(): Set<string> {
+  return new Set([...runningRepos.values()].flat())
+}
 
 /** Starts an install and resolves with its key once the downloads are queued; the profile is added when they finish. */
 export async function installCatalogModel(req: CatalogInstallRequest, deps: CatalogDeps): Promise<string> {
@@ -58,6 +66,7 @@ export async function installCatalogModel(req: CatalogInstallRequest, deps: Cata
   running.add(key)
   try {
     const repos = [...new Set(recipe.components.map((c) => c.repo))]
+    runningRepos.set(key, repos)
     const details = new Map<string, HfRepoDetails>()
     for (const repo of repos) details.set(repo, await deps.repoDetails(repo))
     const resolved = resolveInstall(recipe, quants, (r) => details.get(r))
@@ -69,6 +78,8 @@ export async function installCatalogModel(req: CatalogInstallRequest, deps: Cata
         const results = await Promise.all(ids.map((id) => deps.downloads.whenDone(id)))
         if (results.some((r) => r.state !== 'done')) return
         const profile = profileFromInstall({ ...req, quants }, resolved, (r) => deps.downloads.localDir(r), await deps.vramMiB())
+        const missing = Object.entries(profile.args).filter(([slot, v]) => typeof v === 'string' && resolved.components.some((rc) => rc.component.slot === slot) && !existsSync(v))
+        if (missing.length) throw new Error(`files are missing: ${missing.map(([, v]) => v).join(', ')}`)
         const settings = deps.getSettings()
         // Re-installing (e.g. another quant) replaces nothing: each install adds its own profile.
         const next = await deps.updateSettings({
@@ -84,11 +95,13 @@ export async function installCatalogModel(req: CatalogInstallRequest, deps: Cata
         deps.onError(key, `${model.label} downloaded, but its profile could not be created: ${message}`)
       } finally {
         running.delete(key)
+        runningRepos.delete(key)
       }
     })()
     return key
   } catch (err) {
     running.delete(key)
+    runningRepos.delete(key)
     throw err
   }
 }

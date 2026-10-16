@@ -196,7 +196,7 @@ export function listDevices(serverPath: string): Promise<string[]> {
 
 /** Maps sd.cpp log lines to coarse pipeline stages shown in the UI. */
 export function parseStageLine(line: string): 'decoding' | 'hires' | 'sampling' | null {
-  if (/decoding \d+ latents|tiled vae|vae_tiling/i.test(line)) return 'decoding'
+  if (/decoding \d+(?:\/\d+)? latents|tiled vae|vae_tiling/i.test(line)) return 'decoding'
   if (/hires fix: upscaling/i.test(line)) return 'hires'
   if (/generating image: \d+\/\d+/i.test(line)) return 'sampling'
   return null
@@ -630,7 +630,8 @@ export class SdServer extends EventEmitter {
         if (!r.ok) throw await r.errorMessage()
         const job = r.json as JobJson
         const status = job.status ?? 'unknown'
-        if (typeof job.queue_position === 'number' && opts.onQueued) opts.onQueued(job.queue_position)
+        // Both servers send queue_position while generating too (as 0); it is only a queue update while queued.
+        if (status === 'queued' && typeof job.queue_position === 'number' && opts.onQueued) opts.onQueued(job.queue_position)
         if ((status === 'queued' || status === 'generating') && status !== lastState) {
           lastState = status
           opts.onState?.(status)
@@ -643,7 +644,7 @@ export class SdServer extends EventEmitter {
         if (status === 'completed') {
           if (aborted) throw abortErr()
           const result = job.result
-          if (!result) throw new Error('sd-server reported the job as completed but returned no result')
+          if (!result?.images?.length) throw new Error('the local engine reported the job as completed but returned no images')
           return {
             format: result.output_format ?? 'png',
             images: (result.images ?? []).map((im) => Buffer.from(im.b64_json ?? '', 'base64'))
