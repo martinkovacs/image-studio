@@ -95,7 +95,7 @@ export function LocalModelSelect({ compact }: { compact?: boolean }) {
       )
     }
     return (
-      <div className="rounded-md border border-dashed border-ink-700 p-3 text-xs leading-relaxed text-ink-400">
+      <div className="rounded-md border border-dashed border-ink-700 p-3 text-xs leading-relaxed text-ink-300">
         No local models for {effective === 'diffusers' ? 'diffusers' : 'stable-diffusion.cpp'} yet. The model browser downloads a supported model and sets it up.
         <Button size="sm" className="mt-2 w-full" onClick={() => openSettings('browser')}>
           Open model browser
@@ -135,7 +135,7 @@ export function LocalModelSelect({ compact }: { compact?: boolean }) {
           </Button>
         )}
       </div>
-      <div className={cx('flex items-center gap-2 font-mono text-[11px] text-ink-400', compact && 'hidden')}>
+      <div className={cx('flex items-center gap-2 font-mono text-[11px] text-ink-300', compact && 'hidden')}>
         <ServerDot />
         {status.state === 'starting' && (
           <>

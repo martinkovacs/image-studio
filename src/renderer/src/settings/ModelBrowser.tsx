@@ -130,24 +130,24 @@ function DownloadLine({ d, onCancel }: { d: HfDownloadProgress; onCancel?: () =>
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-3">
         <Bar value={d.bytesDone} total={d.bytesTotal} />
-        <span className="shrink-0 font-mono text-[10px] text-ink-400">
+        <span className="shrink-0 font-mono text-[10px] text-ink-300">
           {d.state === 'queued' ? 'queued' : d.state === 'verifying' ? 'verifying' : `${formatBytes(d.bytesDone)} / ${formatBytes(d.bytesTotal)}`}
           {d.speed ? ` · ${formatBytes(d.speed)}/s` : ''}
         </span>
         {onCancel && (
-          <button onClick={onCancel} title="Cancel (resumable)" className="text-ink-500 hover:text-stop">
+          <button onClick={onCancel} title="Cancel (resumable)" className="text-ink-400 hover:text-stop">
             <X size={12} />
           </button>
         )}
       </div>
-      {d.file && <span className="truncate font-mono text-[10px] text-ink-500">{d.file}</span>}
+      {d.file && <span className="truncate font-mono text-[10px] text-ink-300">{d.file}</span>}
     </div>
   )
 }
 
 function HfLink({ repo }: { repo: string }) {
   return (
-    <a href={`https://huggingface.co/${repo}`} target="_blank" className="inline-flex items-center gap-1 font-mono text-[11px] text-ink-400 hover:text-safelight">
+    <a href={`https://huggingface.co/${repo}`} target="_blank" className="inline-flex items-center gap-1 font-mono text-[11px] text-ink-300 hover:text-safelight">
       {repo} <ExternalLink size={10} />
     </a>
   )
@@ -210,10 +210,10 @@ function CatalogCard({ model, downloads }: { model: CatalogModel; downloads: HfD
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2.5">
             <h4 className="font-display text-[15px] font-semibold text-ink-100">{model.label}</h4>
-            <span className="text-[12px] text-ink-500">{model.creator}</span>
+            <span className="text-[12px] text-ink-300">{model.creator}</span>
           </div>
-          <p className="mt-1 max-w-xl text-[12px] leading-relaxed text-ink-400">{model.description}</p>
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-ink-500">
+          <p className="mt-1 max-w-xl text-[12px] leading-relaxed text-ink-300">{model.description}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-ink-300">
             <span title="Artificial Analysis image-editing arena Elo" className="rounded border border-ink-700 px-1.5 py-px text-ink-300">
               Elo {model.elo}
             </span>
@@ -276,8 +276,8 @@ function CatalogCard({ model, downloads }: { model: CatalogModel; downloads: HfD
               .
             </p>
           )}
-          <p className="text-[11px] leading-relaxed text-ink-500">{recipe.note}</p>
-          {autoTeQuant && <p className="text-[11px] text-ink-400">This GPU has under 24 GB, so the profile quantizes the text encoder to 8-bit.</p>}
+          <p className="text-[11px] leading-relaxed text-ink-300">{recipe.note}</p>
+          {autoTeQuant && <p className="text-[11px] text-ink-300">This GPU has under 24 GB, so the profile quantizes the text encoder to 8-bit.</p>}
 
           <div className="flex flex-col divide-y divide-ink-800 rounded-md border border-ink-800">
             {recipe.components.map((c) => {
@@ -335,7 +335,7 @@ function CatalogCard({ model, downloads }: { model: CatalogModel; downloads: HfD
 function SupportedTab({ downloads }: { downloads: HfDownloadProgress[] }) {
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[12px] leading-relaxed text-ink-400">
+      <p className="text-[12px] leading-relaxed text-ink-300">
         Open-weights models scoring 1000+ Elo on the{' '}
         <a href="https://artificialanalysis.ai/image/leaderboard/editing?open-weights=true" target="_blank" className="text-safelight hover:underline">
           Artificial Analysis image-editing leaderboard
@@ -393,10 +393,10 @@ function RepoView({ id, onBack, downloads }: { id: string; onBack: () => void; d
         </a>
       </div>
       {errors[id] && <p className="text-[12px] text-stop">{errors[id]}</p>}
-      {!d && !errors[id] && <p className="text-[12px] text-ink-500">Loading file list…</p>}
+      {!d && !errors[id] && <p className="text-[12px] text-ink-300">Loading file list…</p>}
       {d && (
         <>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-ink-500">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-ink-300">
             <span>{d.kind === 'diffusers' ? 'diffusers pipeline' : d.kind === 'gguf' ? 'GGUF quantizations' : d.kind === 'single-file' ? 'single-file weights' : 'other'}</span>
             {d.license && <span>licence: {d.license}</span>}
             {d.gated && (
@@ -415,7 +415,7 @@ function RepoView({ id, onBack, downloads }: { id: string; onBack: () => void; d
               <div className="flex items-center gap-3">
                 <div className="flex-1">
                   <div className="text-[13px] text-ink-100">Pipeline folder</div>
-                  <div className="text-[11px] text-ink-500">Configs, tokenizers and safetensors weights for the diffusers backend ({pipelineFiles.length} files).</div>
+                  <div className="text-[11px] text-ink-300">Configs, tokenizers and safetensors weights for the diffusers backend ({pipelineFiles.length} files).</div>
                 </div>
                 <span className="font-mono text-[12px] text-ink-200">{formatBytes(sizeOf(pipelineFiles))}</span>
                 <FitBadge bytes={sizeOf(pipelineFiles)} />
@@ -423,7 +423,7 @@ function RepoView({ id, onBack, downloads }: { id: string; onBack: () => void; d
                   <Download size={12} /> Download
                 </Button>
               </div>
-              <label className="flex items-center gap-2 text-[12px] text-ink-400">
+              <label className="flex items-center gap-2 text-[12px] text-ink-300">
                 <input type="checkbox" checked={skipTransformer} onChange={(e) => setSkipTransformer(e.target.checked)} className="accent-[var(--color-safelight)]" />
                 Skip transformer weights (pair the folder with a GGUF transformer)
               </label>
@@ -437,8 +437,8 @@ function RepoView({ id, onBack, downloads }: { id: string; onBack: () => void; d
                 {groups.map((q) => (
                   <div key={q.quant} className="flex items-center gap-3 px-4 py-2">
                     <span className="w-28 font-mono text-[12px] text-ink-100">{q.quant}</span>
-                    <span className="w-16 font-mono text-[11px] text-ink-500">{q.bits ? `${q.bits} bpw` : ''}</span>
-                    <span className="text-[11px] text-ink-500">{q.files.length > 1 ? `${q.files.length} parts` : ''}</span>
+                    <span className="w-16 font-mono text-[11px] text-ink-300">{q.bits ? `${q.bits} bpw` : ''}</span>
+                    <span className="text-[11px] text-ink-300">{q.files.length > 1 ? `${q.files.length} parts` : ''}</span>
                     <div className="flex-1" />
                     <FitBadge bytes={q.totalBytes} />
                     <span className="w-16 text-right font-mono text-[11px] text-ink-300">{formatBytes(q.totalBytes)}</span>
@@ -464,7 +464,7 @@ function RepoView({ id, onBack, downloads }: { id: string; onBack: () => void; d
               ))}
             </Panel>
           )}
-          {d.kind === 'other' && <p className="text-[12px] text-ink-500">No GGUF, safetensors or diffusers weights in this repository.</p>}
+          {d.kind === 'other' && <p className="text-[12px] text-ink-300">No GGUF, safetensors or diffusers weights in this repository.</p>}
         </>
       )}
     </div>
@@ -505,7 +505,7 @@ function SearchTab({ downloads }: { downloads: HfDownloadProgress[] }) {
         }}
       >
         <div className="relative flex-1">
-          <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-500" />
+          <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400" />
           <TextInput value={opts.query} onChange={(e) => setOpts({ ...opts, query: e.target.value })} placeholder="Search models, e.g. qwen-image, flux.2, unsloth" className="pl-8" />
         </div>
         <Button type="submit" disabled={busy}>
@@ -554,11 +554,11 @@ function SearchTab({ downloads }: { downloads: HfDownloadProgress[] }) {
                 {m.id}
                 {m.gated && <Lock size={11} className="shrink-0 text-safelight" />}
               </div>
-              <div className="truncate font-mono text-[10px] text-ink-500">
+              <div className="truncate font-mono text-[10px] text-ink-300">
                 {[...new Set([m.pipelineTag, m.libraryName, m.tags.includes('gguf') ? 'gguf' : null].filter(Boolean))].join(' · ')}
               </div>
             </div>
-            <span className="flex shrink-0 items-center gap-3 font-mono text-[11px] text-ink-400">
+            <span className="flex shrink-0 items-center gap-3 font-mono text-[11px] text-ink-300">
               <span title="Downloads (30 days)">
                 <Download size={10} className="mr-1 inline" />
                 {m.downloads.toLocaleString()}
@@ -570,8 +570,8 @@ function SearchTab({ downloads }: { downloads: HfDownloadProgress[] }) {
             </span>
           </button>
         ))}
-        {results?.length === 0 && <p className="px-4 py-6 text-center text-[12px] text-ink-500">No models found.</p>}
-        {!results && busy && <p className="px-4 py-6 text-center text-[12px] text-ink-500">Searching…</p>}
+        {results?.length === 0 && <p className="px-4 py-6 text-center text-[12px] text-ink-300">No models found.</p>}
+        {!results && busy && <p className="px-4 py-6 text-center text-[12px] text-ink-300">Searching…</p>}
       </Panel>
     </div>
   )
@@ -608,7 +608,7 @@ function DownloadedTab({ downloads }: { downloads: HfDownloadProgress[] }) {
           {active.map((d) => (
             <div key={d.downloadId} className="flex flex-col gap-1">
               <span className="text-[12px] text-ink-200">
-                {d.repo} <span className="font-mono text-[10px] text-ink-500">({d.filesDone}/{d.filesTotal} files)</span>
+                {d.repo} <span className="font-mono text-[10px] text-ink-300">({d.filesDone}/{d.filesTotal} files)</span>
               </span>
               <DownloadLine d={d} onCancel={() => void window.api.hf.cancel(d.downloadId)} />
             </div>
@@ -625,7 +625,7 @@ function DownloadedTab({ downloads }: { downloads: HfDownloadProgress[] }) {
           <div key={r.repo} className="flex items-center gap-3 px-4 py-2.5">
             <div className="min-w-0 flex-1">
               <div className="truncate text-[13px] text-ink-100">{r.repo}</div>
-              <div className="font-mono text-[10px] text-ink-500">
+              <div className="font-mono text-[10px] text-ink-300">
                 {r.kind} · {r.files.length} files
               </div>
             </div>
@@ -648,7 +648,7 @@ function DownloadedTab({ downloads }: { downloads: HfDownloadProgress[] }) {
               size="sm"
               variant="ghost"
               title="Delete files"
-              className="text-ink-500 hover:text-stop"
+              className="text-ink-400 hover:text-stop"
               onClick={async () => {
                 if (!confirm(`Delete ${r.repo} (${formatBytes(r.totalBytes)}) from disk? Profiles using it stop working.`)) return
                 await window.api.hf.removeLocal(r.repo).catch((e: Error) => showError(e.message))
@@ -659,11 +659,11 @@ function DownloadedTab({ downloads }: { downloads: HfDownloadProgress[] }) {
             </Button>
           </div>
         ))}
-        {local?.length === 0 && <p className="px-4 py-6 text-center text-[12px] text-ink-500">Nothing downloaded yet.</p>}
+        {local?.length === 0 && <p className="px-4 py-6 text-center text-[12px] text-ink-300">Nothing downloaded yet.</p>}
       </Panel>
-      <p className="font-mono text-[11px] text-ink-500">
+      <p className="font-mono text-[11px] text-ink-300">
         {settings.local.modelsDir}{' '}
-        <button className="ml-2 text-ink-400 underline hover:text-ink-100" onClick={() => openSettings('huggingface')}>
+        <button className="ml-2 text-ink-300 underline hover:text-ink-100" onClick={() => openSettings('huggingface')}>
           change
         </button>
       </p>

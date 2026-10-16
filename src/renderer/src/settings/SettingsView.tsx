@@ -39,7 +39,7 @@ function Row({ label, desc, children }: { label: string; desc?: string; children
     <div className="flex items-center justify-between gap-6">
       <div>
         <div className="text-[13px] text-ink-100">{label}</div>
-        {desc && <div className="mt-0.5 max-w-md text-[12px] leading-snug text-ink-500">{desc}</div>}
+        {desc && <div className="mt-0.5 max-w-md text-[12px] leading-snug text-ink-300">{desc}</div>}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -148,7 +148,7 @@ function OpenRouterTab() {
             </Button>
           </div>
         )}
-        <p className="text-[12px] text-ink-500">
+        <p className="text-[12px] text-ink-300">
           Create a key at{' '}
           <a href="https://openrouter.ai/keys" target="_blank" className="text-safelight hover:underline">
             openrouter.ai/keys
@@ -174,7 +174,7 @@ function OpenRouterTab() {
         />
       </Card>
       <Card title="4K output">
-        <p className="text-[12px] leading-relaxed text-ink-400">
+        <p className="text-[12px] leading-relaxed text-ink-300">
           OpenRouter's Image API normalizes size as <code className="font-mono text-ink-200">resolution</code> tiers (512 · 1K · 2K · 4K) plus{' '}
           <code className="font-mono text-ink-200">aspect_ratio</code>. Each model declares which tiers it supports; the studio only offers those. Models without
           a 4K tier top out at 1K/2K or only accept an aspect ratio. For those, use a 4K-capable model, or upscale locally.
@@ -185,7 +185,7 @@ function OpenRouterTab() {
               {m.id}
             </span>
           ))}
-          {fourK.length === 0 && <span className="text-[12px] text-ink-500">Model list not loaded.</span>}
+          {fourK.length === 0 && <span className="text-[12px] text-ink-300">Model list not loaded.</span>}
         </div>
       </Card>
     </>
@@ -220,7 +220,7 @@ function BackendCard() {
         </button>
       }
     >
-      <p className="text-[12px] leading-relaxed text-ink-400">
+      <p className="text-[12px] leading-relaxed text-ink-300">
         Local models run on Hugging Face <b className="font-medium text-ink-200">diffusers</b> (PyTorch + CUDA, fastest on NVIDIA GPUs) or on{' '}
         <b className="font-medium text-ink-200">stable-diffusion.cpp</b> (Vulkan, ROCm, Metal or CPU — runs everywhere, GGUF quantizations). Auto picks diffusers
         when an NVIDIA GPU is present.
@@ -237,7 +237,7 @@ function BackendCard() {
         />
       </Row>
       {info && (
-        <div className="flex flex-wrap gap-x-5 gap-y-1 font-mono text-[11px] text-ink-500">
+        <div className="flex flex-wrap gap-x-5 gap-y-1 font-mono text-[11px] text-ink-300">
           {gpus.length === 0 && <span>no GPU detected</span>}
           {gpus.map((g, i) => (
             <span key={i} className="text-ink-300">
@@ -281,8 +281,8 @@ function DiffusersCard() {
   const step = progress ? PHASES.indexOf(progress.phase) : -1
 
   return (
-    <Card title="diffusers runtime" aside={info?.diffusersVersion && <span className="font-mono text-[11px] text-ink-500">diffusers {info.diffusersVersion}</span>}>
-      <p className="text-[12px] leading-relaxed text-ink-400">
+    <Card title="diffusers runtime" aside={info?.diffusersVersion && <span className="font-mono text-[11px] text-ink-300">diffusers {info.diffusersVersion}</span>}>
+      <p className="text-[12px] leading-relaxed text-ink-300">
         A private Python environment (uv, Python 3.12, PyTorch with CUDA, diffusers) installed into the app&apos;s data folder. Needs about 8 GB of disk and an
         NVIDIA driver; nothing is installed system-wide.
       </p>
@@ -291,7 +291,7 @@ function DiffusersCard() {
         <div className="flex flex-wrap gap-x-5 gap-y-1 font-mono text-[11px] text-ink-300">
           <span>torch {info.torchVersion}</span>
           <span className={info.cudaAvailable ? 'text-fixer' : 'text-stop'}>{info.cudaAvailable ? `CUDA · ${info.deviceName ?? 'GPU'}` : 'CUDA unavailable — check the NVIDIA driver'}</span>
-          {info.sizeBytes ? <span className="text-ink-500">{formatBytes(info.sizeBytes)} on disk</span> : null}
+          {info.sizeBytes ? <span className="text-ink-300">{formatBytes(info.sizeBytes)} on disk</span> : null}
           {info.outdated && <span className="text-safelight">update available</span>}
         </div>
       )}
@@ -304,9 +304,9 @@ function DiffusersCard() {
                 style={{ width: `${progress.total ? ((progress.received ?? 0) / progress.total) * 100 : ((step + 0.5) / PHASES.length) * 100}%` }}
               />
             </div>
-            <span className="font-mono text-[10px] text-ink-400">{progress.message ?? progress.phase}</span>
+            <span className="font-mono text-[10px] text-ink-300">{progress.message ?? progress.phase}</span>
           </div>
-          {log.length > 0 && <pre className="max-h-28 select-text overflow-auto rounded-md border border-ink-800 bg-ink-950 p-2 font-mono text-[10px] leading-relaxed text-ink-400">{log.slice(-8).join('\n')}</pre>}
+          {log.length > 0 && <pre className="max-h-28 select-text overflow-auto rounded-md border border-ink-800 bg-ink-950 p-2 font-mono text-[10px] leading-relaxed text-ink-300">{log.slice(-8).join('\n')}</pre>}
         </div>
       )}
       {progress?.phase === 'error' && <p className="select-text text-[12px] text-stop">{progress.error}</p>}
@@ -320,7 +320,7 @@ function DiffusersCard() {
               size="sm"
               variant="ghost"
               disabled={busy}
-              className="text-ink-500 hover:text-stop"
+              className="text-ink-300 hover:text-stop"
               onClick={async () => {
                 if (!confirm('Remove the diffusers runtime? Downloaded models are kept.')) return
                 await window.api.diffusers.remove().catch((e: Error) => showError(e.message))
@@ -390,9 +390,9 @@ function SdcppCard() {
     <>
       <Card
         title="stable-diffusion.cpp"
-        aside={<span className="font-mono text-[11px] text-ink-500">latest {info?.latestVersion ?? '…'}</span>}
+        aside={<span className="font-mono text-[11px] text-ink-300">latest {info?.latestVersion ?? '…'}</span>}
       >
-        <p className="text-[12px] leading-relaxed text-ink-400">
+        <p className="text-[12px] leading-relaxed text-ink-300">
           The app runs <code className="font-mono text-ink-200">sd-server</code> from stable-diffusion.cpp locally. Pick the build for your GPU. Vulkan works on NVIDIA,
           AMD and Intel; CUDA is usually fastest on NVIDIA.
         </p>
@@ -414,7 +414,7 @@ function SdcppCard() {
                   />
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] text-ink-100">{v.label}</div>
-                    <div className="font-mono text-[10px] text-ink-500">
+                    <div className="font-mono text-[10px] text-ink-300">
                       {v.bundled && (v.installed ? 'bundled · ' : 'bundled')}
                       {v.installed ? `installed ${v.installedVersion ?? ''}` : v.bundled ? '' : 'not installed'}
                     </div>
@@ -425,7 +425,7 @@ function SdcppCard() {
                       {v.installed ? (v.installedVersion !== info.latestVersion ? 'Update' : 'Reinstall') : 'Install'}
                     </Button>
                   ) : (
-                    <span className="font-mono text-[10px] text-ink-500">source build</span>
+                    <span className="font-mono text-[10px] text-ink-300">source build</span>
                   )}
                 </div>
                 {busy && (
@@ -433,14 +433,14 @@ function SdcppCard() {
                     <div className="h-[3px] flex-1 overflow-hidden rounded-full bg-ink-700">
                       <div className="h-full bg-safelight transition-[width]" style={{ width: `${pct ?? 100}%` }} />
                     </div>
-                    <span className="font-mono text-[10px] text-ink-400">
+                    <span className="font-mono text-[10px] text-ink-300">
                       {p.phase === 'extracting' ? 'extracting' : `${((p.received ?? 0) / 1e6).toFixed(0)}${p.total ? ` / ${(p.total / 1e6).toFixed(0)}` : ''} MB`}
                     </span>
                   </div>
                 )}
                 {p?.phase === 'error' && <p className="pl-7 text-[11px] text-stop">{p.error}</p>}
                 {v.id === 'linux-cuda-source' && (
-                  <div className="flex flex-col gap-1.5 pl-7 text-[12px] text-ink-500">
+                  <div className="flex flex-col gap-1.5 pl-7 text-[12px] text-ink-300">
                     No official Linux CUDA build exists. Build it once (needs the CUDA toolkit, cmake and git); it installs here automatically:
                     <CodeLine text="npm run build-sdcpp-cuda" />
                   </div>
@@ -537,7 +537,7 @@ function ProfilesTab() {
 
   return (
     <>
-      <p className="text-[13px] leading-relaxed text-ink-400">
+      <p className="text-[13px] leading-relaxed text-ink-300">
         A profile tells a local backend which weight files to load and how. The{' '}
         <button className="text-safelight hover:underline" onClick={() => openSettings('browser')}>
           model browser
@@ -570,12 +570,12 @@ function ProfilesTab() {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="truncate font-display text-[14px] font-semibold text-ink-100">{p.name}</div>
-                  <div className="truncate font-mono text-[10px] text-ink-500">{mainFile(p) || 'no model file'}</div>
+                  <div className="truncate font-mono text-[10px] text-ink-300">{mainFile(p) || 'no model file'}</div>
                 </div>
                 <div className="flex shrink-0 gap-1">
                   <span
                     title={other ? `Not the backend in use (${BACKEND_LABEL[effective]})` : undefined}
-                    className="rounded border border-ink-700 px-1.5 py-0.5 font-mono text-[10px] text-ink-400"
+                    className="rounded border border-ink-700 px-1.5 py-0.5 font-mono text-[10px] text-ink-300"
                   >
                     {profileBackend(p) === 'diffusers' ? 'diffusers' : 'sd.cpp'}
                   </span>
@@ -598,7 +598,7 @@ function ProfilesTab() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="text-ink-500 hover:text-stop"
+                  className="text-ink-300 hover:text-stop"
                   onClick={async () => {
                     if (!confirm(`Delete profile "${p.name}"? Model files are not touched.`)) return
                     await saveProfiles(profiles.filter((x) => x.id !== p.id))
@@ -613,7 +613,7 @@ function ProfilesTab() {
         })}
         <button
           onClick={() => setEditing({ id: uid(), name: '', backend: effective, args: {}, extraArgs: '' })}
-          className="flex min-h-28 items-center justify-center rounded-lg border border-dashed border-ink-700 text-[13px] text-ink-400 hover:border-safelight/60 hover:text-ink-100"
+          className="flex min-h-28 items-center justify-center rounded-lg border border-dashed border-ink-700 text-[13px] text-ink-300 hover:border-safelight/60 hover:text-ink-100"
         >
           + New profile
         </button>
@@ -668,7 +668,7 @@ function HuggingFaceTab() {
             </Button>
           </div>
         )}
-        <p className="text-[12px] leading-relaxed text-ink-500">
+        <p className="text-[12px] leading-relaxed text-ink-300">
           Only needed for gated repositories such as FLUX.2 [klein] 9B: accept the licence on the model page, then create a read token at{' '}
           <a href="https://huggingface.co/settings/tokens" target="_blank" className="text-safelight hover:underline">
             huggingface.co/settings/tokens
@@ -765,7 +765,7 @@ export function SettingsView() {
             onClick={() => setTab(t.id)}
             className={cx(
               'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px]',
-              tab === t.id ? 'bg-ink-800 text-ink-100' : 'text-ink-400 hover:bg-ink-850 hover:text-ink-200'
+              tab === t.id ? 'bg-ink-800 text-ink-100' : 'text-ink-300 hover:bg-ink-850 hover:text-ink-200'
             )}
           >
             <span className={tab === t.id ? 'text-safelight' : ''}>{t.icon}</span>
